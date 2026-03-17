@@ -62,22 +62,35 @@ else
     ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Network:${NC} Cannot reach internet\n"
 fi
 
-# 5. OS Patch & Update Status (ใหม่ล่าสุด!)
+# 5. OS Patch & Update Status (APT)
 print_and_log "\n${YELLOW}[5] OS Patch & Update Status (APT):${NC}"
-print_and_log "Checking for available updates... (Please wait)"
-# อัปเดตรายการจาก Repo แบบเงียบๆ (ใส่ timeout กันค้างกรณีเน็ตมีปัญหา)
-timeout 15 apt-get update -qq 2>/dev/null
 
-# นับจำนวนแพ็กเกจที่รออัปเกรด
-UPGRADES=$(apt-get -s upgrade 2>/dev/null | grep -Po '^\d+(?= upgraded)' || echo "0")
+# ตรวจสอบว่าเป็น Debian 8 (Jessie) หรือไม่
+OS_CODENAME=$(grep -Po 'VERSION="[0-9]+ \(\K[^)]+' /etc/os-release 2>/dev/null || grep -Po 'VERSION_CODENAME=\K.*' /etc/os-release 2>/dev/null || echo "unknown")
 
-if [ "$UPGRADES" -eq 0 ]; then
-    print_and_log "${GREEN}[OK] OS is up-to-date. No pending patches.${NC}"
+# เช็คว่าเป็น Jessie และยังไม่ได้เปลี่ยนไปใช้ archive.debian.org ใช่หรือไม่
+if [ "$OS_CODENAME" == "jessie" ] && ! grep -q "archive.debian.org" /etc/apt/sources.list; then
+    print_and_log "${RED}[FAILED] Debian 8 (Jessie) is End-Of-Life (EOL). Default APT repos will return 404.${NC}"
+    print_and_log "  -> ${YELLOW}Fix Recommendation:${NC} Run these commands to switch to the Archive repo:"
+    print_and_log "     ${CYAN}echo \"deb http://archive.debian.org/debian/ jessie main non-free contrib\" > /etc/apt/sources.list${NC}"
+    print_and_log "     ${CYAN}echo \"deb http://archive.debian.org/debian-security/ jessie/updates main non-free contrib\" >> /etc/apt/sources.list${NC}"
+    print_and_log "     ${CYAN}echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid-until${NC}"
+    print_and_log "     ${CYAN}apt-get update${NC}"
+    ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Update:${NC} APT sources.list is broken (Debian 8 EOL)\n"
 else
-    print_and_log "${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"
-    print_and_log "  -> To see the list, run: ${CYAN}apt-get -s upgrade${NC}"
-    print_and_log "  -> To install updates, run: ${CYAN}apt-get upgrade${NC}"
-    ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches need to be installed\n"
+    print_and_log "Checking for available updates... (Please wait)"
+    timeout 15 apt-get update -qq 2>/dev/null
+    
+    UPGRADES=$(apt-get -s upgrade 2>/dev/null | grep -Po '^\d+(?= upgraded)' || echo "0")
+    
+    if [ "$UPGRADES" -eq 0 ]; then
+        print_and_log "${GREEN}[OK] OS is up-to-date. No pending patches.${NC}"
+    else
+        print_and_log "${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"
+        print_and_log "  -> To see the list, run: ${CYAN}apt-get -s upgrade${NC}"
+        print_and_log "  -> To install updates, run: ${CYAN}apt-get upgrade${NC}"
+        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches need to be installed\n"
+    fi
 fi
 
 # 6. APT Package Manager Health
