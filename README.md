@@ -3,5 +3,5 @@
 
 รันจาก Git Repository โดยตรง (ไม่ต้อง Clone)
 ```Bash
-curl -sL https://raw.githubusercontent.com/Greedtik/Post-Migration-Health-Check/refs/heads/main/health_check.sh
+curl -sL https://raw.githubusercontent.com/Greedtik/Post-Migration-Health-Check/refs/heads/main/health_check.sh | bash
 ```
