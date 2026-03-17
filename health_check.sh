@@ -158,7 +158,6 @@ done | sort -u -t':' -k1,1n
 
 # 8. Firewall Status
 print_and_log "\n${YELLOW}[8] Firewall Status:${NC}"
-print_and_log "${MAGENTA}💡 ADVICE: ระวังอย่า Block Port 22 (SSH) เด็ดขาด ไม่เช่นนั้นจะรีโมทเข้าเครื่องไม่ได้${NC}"
 
 if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     print_and_log "${GREEN}[ACTIVE] firewalld is running.${NC}"
