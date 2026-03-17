@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# ==========================================
-# Post-Migration Health Check & Audit (Enterprise v2)
-# ==========================================
+# ==============================================================================
+# Universal Post-Migration Health Check & Audit Script
+# Supported OS: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux
+# ==============================================================================
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -27,12 +28,40 @@ fi
 echo "Post-Migration Audit Log - $(date)" > "$LOG_FILE"
 echo "=========================================" >> "$LOG_FILE"
 
+# ==========================================
+# Phase 0: OS Detection (ค้นหาว่ากำลังรันบน OS อะไร)
+# ==========================================
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS_NAME=$NAME
+    OS_ID=$ID
+    OS_LIKE=$ID_LIKE
+else
+    OS_NAME=$(uname -s)
+    OS_ID="unknown"
+fi
+
+# แยกตระกูล OS เพื่อใช้คำสั่งที่ถูกต้อง
+if [[ "$OS_ID" == *"ubuntu"* ]] || [[ "$OS_ID" == *"debian"* ]] || [[ "$OS_LIKE" == *"debian"* ]]; then
+    OS_FAMILY="debian"
+    ADMIN_GROUP="sudo"
+    PKG_MGR="apt-get"
+elif [[ "$OS_ID" == *"centos"* ]] || [[ "$OS_ID" == *"rhel"* ]] || [[ "$OS_ID" == *"rocky"* ]] || [[ "$OS_ID" == *"almalinux"* ]] || [[ "$OS_LIKE" == *"rhel"* ]]; then
+    OS_FAMILY="rhel"
+    ADMIN_GROUP="wheel"
+    command -v dnf >/dev/null 2>&1 && PKG_MGR="dnf" || PKG_MGR="yum"
+else
+    OS_FAMILY="unknown"
+    ADMIN_GROUP="sudo"
+fi
+
 print_and_log "${CYAN}====================================================${NC}"
-print_and_log "${CYAN}  Post-Migration Health Check & Audit (Enterprise)  ${NC}"
+print_and_log "${CYAN}   Universal Health Check & Audit ($OS_NAME)        ${NC}"
 print_and_log "${CYAN}====================================================${NC}"
 
 # 1. System, Load & Time
 print_and_log "\n${YELLOW}[1] System, Load Average & Time:${NC}"
+print_and_log "OS Version: $OS_NAME"
 print_and_log "Uptime & Load: $(uptime)"
 print_and_log "Kernel: $(uname -r)"
 print_and_log "Timezone: $(date)"
@@ -40,9 +69,9 @@ print_and_log "Timezone: $(date)"
 # 2. Disk Space, Mounts & Inodes
 print_and_log "\n${YELLOW}[2] Storage & Inode Status:${NC}"
 print_and_log "${CYAN}>> Disk Space Usage:${NC}"
-print_and_log "$(df -hT | grep -v 'tmpfs\|cdrom')"
+print_and_log "$(df -hT | grep -v 'tmpfs\|cdrom\|squashfs')"
 print_and_log "${CYAN}>> Inode Usage (File Limits):${NC}"
-print_and_log "$(df -hi | grep -v 'tmpfs\|cdrom')"
+print_and_log "$(df -hi | grep -v 'tmpfs\|cdrom\|squashfs')"
 
 # 3. Memory Usage
 print_and_log "\n${YELLOW}[3] Memory Usage:${NC}"
@@ -50,7 +79,6 @@ print_and_log "$(free -m | awk '
     BEGIN { printf "  %-12s %-12s %-12s %-15s\n", "TOTAL(MB)", "USED(MB)", "FREE(MB)", "USAGE(%)" }
     NR==2 { printf "  %-12s %-12s %-12s %.2f%%\n", $2, $3, $4, $3*100/$2 }
 ')"
-
 
 # 4. Network Check
 print_and_log "\n${YELLOW}[4] Network & Connectivity:${NC}"
@@ -62,50 +90,37 @@ else
     ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Network:${NC} Cannot reach internet\n"
 fi
 
-# 5. OS Patch & Update Status (APT)
-print_and_log "\n${YELLOW}[5] OS Patch & Update Status (APT):${NC}"
+# 5. OS Patch & Update Status (แยกตามตระกูล OS)
+print_and_log "\n${YELLOW}[5] OS Patch & Update Status ($PKG_MGR):${NC}"
+print_and_log "Checking for available updates... (Please wait)"
 
-# ตรวจสอบว่าเป็น Debian 8 (Jessie) หรือไม่
-OS_CODENAME=$(grep -Po 'VERSION="[0-9]+ \(\K[^)]+' /etc/os-release 2>/dev/null || grep -Po 'VERSION_CODENAME=\K.*' /etc/os-release 2>/dev/null || echo "unknown")
-
-# เช็คว่าเป็น Jessie และยังไม่ได้เปลี่ยนไปใช้ archive.debian.org ใช่หรือไม่
-if [ "$OS_CODENAME" == "jessie" ] && ! grep -q "archive.debian.org" /etc/apt/sources.list; then
-    print_and_log "${RED}[FAILED] Debian 8 (Jessie) is End-Of-Life (EOL). Default APT repos will return 404.${NC}"
-    print_and_log "  -> ${YELLOW}Fix Recommendation:${NC} Run these commands to switch to the Archive repo:"
-    print_and_log "     ${CYAN}echo \"deb [trusted=yes] http://archive.debian.org/debian/ jessie main non-free contrib\" > /etc/apt/sources.list${NC}"
-    print_and_log "     ${CYAN}echo \"deb [trusted=yes] http://archive.debian.org/debian-security/ jessie/updates main non-free contrib\" >> /etc/apt/sources.list${NC}"
-    print_and_log "     ${CYAN}echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid-until${NC}"
-    print_and_log "     ${CYAN}apt-get update${NC}"
-    ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Update:${NC} APT sources.list is broken (Debian 8 EOL)\n"
-else
-    print_and_log "Checking for available updates... (Please wait)"
+if [ "$OS_FAMILY" == "debian" ]; then
     timeout 15 apt-get update -qq 2>/dev/null
-    
     UPGRADES=$(apt-get -s upgrade 2>/dev/null | grep -Po '^\d+(?= upgraded)' || echo "0")
-    
     if [ "$UPGRADES" -eq 0 ]; then
-        print_and_log "${GREEN}[OK] OS is up-to-date. No pending patches.${NC}"
+        print_and_log "${GREEN}[OK] OS is up-to-date.${NC}"
     else
         print_and_log "${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"
-        print_and_log "  -> To see the list, run: ${CYAN}apt-get -s upgrade${NC}"
-        print_and_log "  -> To install updates, run: ${CYAN}apt-get upgrade${NC}"
-        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches need to be installed\n"
+        print_and_log "  -> To install, run: ${CYAN}apt-get upgrade${NC}"
+        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches\n"
     fi
-fi
-
-# 6. APT Package Manager Health
-print_and_log "\n${YELLOW}[6] APT Package Manager Health:${NC}"
-BROKEN_PKGS=$(dpkg -l | grep "^rc" | wc -l)
-if [ "$BROKEN_PKGS" -gt 0 ]; then
-    print_and_log "${YELLOW}[WARNING] Found $BROKEN_PKGS leftover config files from removed packages.${NC}"
-    print_and_log "  -> Clean them with: ${CYAN}apt-get purge ~c${NC}"
+elif [ "$OS_FAMILY" == "rhel" ]; then
+    # นับจำนวนบรรทัดของแพ็กเกจที่รออัปเดต (ตัดบรรทัดว่างและ header ออก)
+    UPGRADES=$($PKG_MGR check-update -q 2>/dev/null | awk 'NF' | wc -l)
+    if [ "$UPGRADES" -eq 0 ]; then
+        print_and_log "${GREEN}[OK] OS is up-to-date.${NC}"
+    else
+        print_and_log "${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"
+        print_and_log "  -> To install, run: ${CYAN}$PKG_MGR upgrade${NC}"
+        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches\n"
+    fi
 else
-    print_and_log "${GREEN}[OK] Package manager state is clean.${NC}"
+    print_and_log "${YELLOW}[SKIP] Unsupported OS for automatic update check.${NC}"
 fi
 
-# 7. Service Health Check
-print_and_log "\n${YELLOW}[7] Service Health Check:${NC}"
-SERVICES=("ssh" "nginx" "apache2" "mysql" "mariadb" "docker")
+# 6. Service Health Check
+print_and_log "\n${YELLOW}[6] Service Health Check:${NC}"
+SERVICES=("ssh" "sshd" "nginx" "apache2" "httpd" "mysql" "mariadb" "docker")
 for service in "${SERVICES[@]}"; do
     if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null; then
         if systemctl is-active --quiet "$service"; then
@@ -117,8 +132,8 @@ for service in "${SERVICES[@]}"; do
     fi
 done
 
-# 8. Active Ports Check
-print_and_log "\n${YELLOW}[8] Active Listening Ports & Services:${NC}"
+# 7. Active Ports Check
+print_and_log "\n${YELLOW}[7] Active Listening Ports & Services:${NC}"
 ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; do
     port=$(echo "$address" | awk -F':' '{print $NF}')
     service=$(echo "$process" | awk -F'"' '{print $2}')
@@ -126,29 +141,33 @@ ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; 
     print_and_log "- Port ${CYAN}${port}${NC}: [OPEN] by ${GREEN}${service}${NC}"
 done | sort -u -t':' -k1,1n
 
-# 9. Firewall Rules
-print_and_log "\n${YELLOW}[9] Detailed Firewall Rules (iptables):${NC}"
-RULE_COUNT=$(iptables -S | grep "^-A" | wc -l)
-if [ "$RULE_COUNT" -gt 0 ]; then
-    print_and_log "${CYAN}Found $RULE_COUNT custom iptables rules:${NC}"
-    iptables-save | grep -v '^#' | grep -v '^:' | while read -r rule; do
-        print_and_log "  -> $rule"
-    done
+# 8. Firewall Status (เช็คทั้ง firewalld, ufw และ iptables)
+print_and_log "\n${YELLOW}[8] Firewall Status:${NC}"
+if systemctl is-active --quiet firewalld 2>/dev/null; then
+    print_and_log "${GREEN}[ACTIVE] firewalld is running.${NC}"
+    print_and_log "  -> Active Zones: $(firewall-cmd --get-active-zones | tr '\n' ' ')"
+elif systemctl is-active --quiet ufw 2>/dev/null; then
+    print_and_log "${GREEN}[ACTIVE] UFW is running.${NC}"
 else
-    print_and_log "${GREEN}No custom iptables rules found. (System is using default policies)${NC}"
+    RULE_COUNT=$(iptables -S | grep "^-A" | wc -l)
+    if [ "$RULE_COUNT" -gt 0 ]; then
+        print_and_log "${CYAN}Found $RULE_COUNT custom iptables rules:${NC}"
+    else
+        print_and_log "${GREEN}No custom firewall rules found (Default Policies active).${NC}"
+    fi
 fi
 
-# 10. Security Audit: Users & Privileges
-print_and_log "\n${YELLOW}[10] Security Audit (Users & Access):${NC}"
-print_and_log "${CYAN}>> Users with interactive shell access:${NC}"
+# 9. Security Audit: Users & Privileges
+print_and_log "\n${YELLOW}[9] Security Audit (Users & Access):${NC}"
+print_and_log "${CYAN}>> Interactive Users:${NC}"
 awk -F: '($3>=1000 || $1=="root") && $7 !~ /(nologin|false)$/ {print " - " $1}' /etc/passwd | while read -r line; do print_and_log "$line"; done
 
-print_and_log "${CYAN}>> Users in 'sudo' group:${NC}"
-SUDO_USERS=$(grep -Po '^sudo.+:\K.*$' /etc/group)
-print_and_log " - ${SUDO_USERS:-None}"
+print_and_log "${CYAN}>> Admins (Group: $ADMIN_GROUP):${NC}"
+ADMIN_USERS=$(grep -Po "^${ADMIN_GROUP}.+:\K.*$" /etc/group)
+print_and_log " - ${ADMIN_USERS:-None}"
 
 # ==========================================
-# 11. EXECUTIVE SUMMARY
+# 10. EXECUTIVE SUMMARY
 # ==========================================
 print_and_log "\n${CYAN}====================================================${NC}"
 print_and_log "${CYAN}                 EXECUTIVE SUMMARY                  ${NC}"
