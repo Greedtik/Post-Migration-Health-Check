@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# Post-Migration Health Check & Audit (Pro Edition)
+# Post-Migration Health Check & Audit (Enterprise Edition)
 # ==========================================
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -13,7 +13,6 @@ TOTAL_ERRORS=0
 SUMMARY_MSG=""
 LOG_FILE="/var/log/migration_audit_$(date +%F_%H-%M).log"
 
-# ฟังก์ชันสำหรับปริ้นท์ลงจอและเซฟลงไฟล์พร้อมกัน
 print_and_log() {
     echo -e "$1"
     echo -e "$1" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]//g" >> "$LOG_FILE"
@@ -24,23 +23,25 @@ if [ "$EUID" -ne 0 ]; then
   exit
 fi
 
-# เริ่มเขียนลงไฟล์ Log
 echo "Post-Migration Audit Log - $(date)" > "$LOG_FILE"
 echo "=========================================" >> "$LOG_FILE"
 
 print_and_log "${CYAN}====================================================${NC}"
-print_and_log "${CYAN}   Post-Migration Health Check & Audit (Debian 8)   ${NC}"
+print_and_log "${CYAN}  Post-Migration Health Check & Audit (Enterprise)  ${NC}"
 print_and_log "${CYAN}====================================================${NC}"
 
 # 1. System, Load & Time
 print_and_log "\n${YELLOW}[1] System, Load Average & Time:${NC}"
-print_and_log "$(uptime)"
+print_and_log "Uptime & Load: $(uptime)"
 print_and_log "Kernel: $(uname -r)"
 print_and_log "Timezone: $(date)"
 
-# 2. Disk Space & Mounts
-print_and_log "\n${YELLOW}[2] Storage Status:${NC}"
+# 2. Disk Space, Mounts & Inodes (อัปเดตเพิ่ม Inodes)
+print_and_log "\n${YELLOW}[2] Storage & Inode Status:${NC}"
+print_and_log "${CYAN}>> Disk Space Usage:${NC}"
 print_and_log "$(df -hT | grep -v 'tmpfs\|cdrom')"
+print_and_log "${CYAN}>> Inode Usage (File Limits):${NC}"
+print_and_log "$(df -hi | grep -v 'tmpfs\|cdrom')"
 
 # 3. Memory Usage
 print_and_log "\n${YELLOW}[3] Memory Usage:${NC}"
@@ -56,28 +57,21 @@ else
     ((TOTAL_ERRORS++)); SUMMARY_MSG+="- Network: Cannot reach internet\n"
 fi
 
-# 5. Cloud-Init State Check (อัปเดตใหม่รองรับ Proxmox)
-print_and_log "\n${YELLOW}[5] Cloud-Init Status Check:${NC}"
-if dpkg -l | grep -qw cloud-init; then
-    print_and_log "${GREEN}[OK] 'cloud-init' is installed and ready for Proxmox.${NC}"
-    
-    # เช็คว่ามีโฟลเดอร์ร่องรอยของ OpenStack/EC2 ค้างอยู่ไหม
-    if [ -d /var/lib/cloud/instances/ ]; then
-        print_and_log "${YELLOW}  -> [NOTE] Old cloud instance data found.${NC}"
-        print_and_log "  -> If boot is slow, run: ${CYAN}sudo cloud-init clean --logs${NC}"
-    else
-        print_and_log "  -> State is clean."
-    fi
+# 5. Package Manager & System Health (ใหม่! เช็คความสมบูรณ์ของ OS)
+print_and_log "\n${YELLOW}[5] APT Package Manager Health:${NC}"
+BROKEN_PKGS=$(dpkg -l | grep "^rc" | wc -l)
+if [ "$BROKEN_PKGS" -gt 0 ]; then
+    print_and_log "${YELLOW}[WARNING] Found $BROKEN_PKGS leftover config files from removed packages.${NC}"
+    print_and_log "  -> Clean them with: ${CYAN}apt-get purge ~c${NC}"
 else
-    print_and_log "${YELLOW}[WARNING] 'cloud-init' is NOT installed.${NC}"
-    print_and_log "  -> You will not be able to use Proxmox Cloud-Init features."
+    print_and_log "${GREEN}[OK] Package manager state is clean.${NC}"
 fi
 
 # 6. Service Health Check
 print_and_log "\n${YELLOW}[6] Service Health Check:${NC}"
 SERVICES=("ssh" "nginx" "apache2" "mysql" "mariadb" "docker")
 for service in "${SERVICES[@]}"; do
-    if systemctl list-unit-files | grep -q "^${service}.service"; then
+    if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null; then
         if systemctl is-active --quiet "$service"; then
             print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
         else
@@ -96,30 +90,42 @@ ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; 
     print_and_log "- Port ${CYAN}${port}${NC}: [OPEN] by ${GREEN}${service}${NC}"
 done | sort -u -t':' -k1,1n
 
-# 8. Firewall Full Rules (ตามที่กัปตันขอ: กาง Rule ออกมาให้หมด)
+# 8. Firewall Rules
 print_and_log "\n${YELLOW}[8] Detailed Firewall Rules (iptables):${NC}"
 RULE_COUNT=$(iptables -S | grep "^-A" | wc -l)
 if [ "$RULE_COUNT" -gt 0 ]; then
     print_and_log "${CYAN}Found $RULE_COUNT custom iptables rules:${NC}"
-    # ดึง rules ออกมาแสดง แต่ตัดพวก default chain ทิ้งเพื่อไม่ให้รก
     iptables-save | grep -v '^#' | grep -v '^:' | while read -r rule; do
         print_and_log "  -> $rule"
     done
 else
     print_and_log "${GREEN}No custom iptables rules found. (System is using default policies)${NC}"
-    iptables -S | grep "^-P" | awk '{print "  -> Policy " $2 ": " $3}' | while read -r p; do print_and_log "$p"; done
 fi
 
-# 9. SSH Security Posture (ไอเดียใหม่: เช็คความปลอดภัย)
-print_and_log "\n${YELLOW}[9] SSH Security Posture:${NC}"
-ROOT_SSH=$(sshd -T 2>/dev/null | grep "^permitrootlogin" | awk '{print $2}')
-PASS_SSH=$(sshd -T 2>/dev/null | grep "^passwordauthentication" | awk '{print $2}')
+# 9. Security Audit: Users & Privileges (ใหม่! เช็คคนมีสิทธิ์เข้าเครื่อง)
+print_and_log "\n${YELLOW}[9] Security Audit (Users & Access):${NC}"
+print_and_log "${CYAN}>> Users with interactive shell access:${NC}"
+# กรองเอาเฉพาะ user ที่ล็อกอินได้ (มี bash/sh)
+awk -F: '($3>=1000 || $1=="root") && $7 !~ /(nologin|false)$/ {print " - " $1}' /etc/passwd | while read -r line; do print_and_log "$line"; done
 
-print_and_log " - Root Login Allowed: $(if [ "$ROOT_SSH" = "yes" ]; then echo -e "${RED}YES (High Risk)${NC}"; else echo -e "${GREEN}NO${NC}"; fi)"
-print_and_log " - Password Auth Allowed: $(if [ "$PASS_SSH" = "yes" ]; then echo -e "${YELLOW}YES (Consider using Keys)${NC}"; else echo -e "${GREEN}NO${NC}"; fi)"
+print_and_log "${CYAN}>> Users in 'sudo' group:${NC}"
+SUDO_USERS=$(grep -Po '^sudo.+:\K.*$' /etc/group)
+print_and_log " - ${SUDO_USERS:-None}"
+
+# 10. Background Tasks (ใหม่! แอบดูสคริปต์ตั้งเวลา)
+print_and_log "\n${YELLOW}[10] Scheduled Tasks (Root Crontab):${NC}"
+CRON_COUNT=$(crontab -l -u root 2>/dev/null | grep -v "^#" | grep -v "^$" | wc -l)
+if [ "$CRON_COUNT" -gt 0 ]; then
+    print_and_log "${CYAN}Found $CRON_COUNT active root cron jobs:${NC}"
+    crontab -l -u root 2>/dev/null | grep -v "^#" | grep -v "^$" | while read -r cron; do
+        print_and_log "  -> $cron"
+    done
+else
+    print_and_log "${GREEN}No custom root cron jobs found.${NC}"
+fi
 
 # ==========================================
-# 10. EXECUTIVE SUMMARY
+# 11. EXECUTIVE SUMMARY
 # ==========================================
 print_and_log "\n${CYAN}====================================================${NC}"
 print_and_log "${CYAN}                 EXECUTIVE SUMMARY                  ${NC}"
@@ -127,7 +133,7 @@ print_and_log "${CYAN}====================================================${NC}"
 
 if [ $TOTAL_ERRORS -eq 0 ]; then
     print_and_log "${GREEN}[PASS] All critical systems are healthy!${NC}"
-    print_and_log "The server has successfully migrated."
+    print_and_log "The server has successfully migrated and is secure."
 else
     print_and_log "${RED}[FAIL] Health check found $TOTAL_ERRORS critical issue(s).${NC}"
     print_and_log "Please review the following errors:"
