@@ -52,20 +52,23 @@ for service in "${SERVICES[@]}"; do
     fi
 done
 
-# 6. Check Specific Listening Ports (อัปเดตใหม่)
-echo -e "\n${YELLOW}[6] Critical Ports Check:${NC}"
-# กัปตันสามารถแก้ไขเลข Port ที่ต้องการเช็คได้ที่บรรทัดนี้ครับ
-PORTS_TO_CHECK=(22 80 443 3306)
-
-for port in "${PORTS_TO_CHECK[@]}"; do
-    # ใช้ ss ตรวจสอบว่ามี Port นี้อยู่ในสถานะ LISTEN หรือไม่
-    if ss -tulpn | grep -q ":${port} "; then
-        echo -e "- Port $port: ${GREEN}[LISTENING]${NC}"
-    else
-        # แจ้งเตือนสีแดง แต่เราจะไม่นับเป็น Error ร้ายแรงใน Summary เผื่อว่าเครื่องนี้ไม่ได้ใช้พอร์ตนั้นครับ
-        echo -e "- Port $port: ${RED}[CLOSED]${NC} (No service listening)"
+# 6. Check All Active Listening Ports (อัปเดตใหม่ สแกนอัตโนมัติ)
+echo -e "\n${YELLOW}[6] Active Listening Ports & Services:${NC}"
+# สแกนหาพอร์ตที่ LISTEN อยู่ทั้งหมด แล้วสกัดเอา Port กับ Service Name มาแสดงผล
+ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; do
+    # ดึงเฉพาะตัวเลขพอร์ตจาก Address
+    port=$(echo "$address" | awk -F':' '{print $NF}')
+    # ดึงเฉพาะชื่อ Service จากคอลัมน์ Process
+    service=$(echo "$process" | awk -F'"' '{print $2}')
+    
+    # ถ้าดึงชื่อ Service ไม่ได้ ให้แสดงเป็น Unknown
+    if [ -z "$service" ]; then
+        service="Unknown/System"
     fi
-done
+    
+    # พิมพ์ผลลัพธ์ออกมา (ใช้สัญลักษณ์ : เพื่อเดี๋ยวเอาไป sort ให้เรียงตามเลข)
+    echo -e "- Port ${CYAN}${port}${NC}: [OPEN] by ${GREEN}${service}${NC}"
+done | sort -u -t':' -k1,1n # ตัดบรรทัดซ้ำ และเรียงจากน้อยไปมากตามเลขพอร์ต
 
 # ==========================================
 # 7. EXECUTIVE SUMMARY
