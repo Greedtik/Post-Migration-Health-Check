@@ -118,16 +118,31 @@ else
     print_and_log "${YELLOW}[SKIP] Unsupported OS for automatic update check.${NC}"
 fi
 
-# 6. Service Health Check
+# 6. Service Health Check (รองรับทั้ง systemd และ SysVinit)
 print_and_log "\n${YELLOW}[6] Service Health Check:${NC}"
 SERVICES=("ssh" "sshd" "nginx" "apache2" "httpd" "mysql" "mariadb" "docker")
+
 for service in "${SERVICES[@]}"; do
-    if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null; then
-        if systemctl is-active --quiet "$service"; then
-            print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
-        else
-            print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
-            ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
+    # ตรวจสอบว่าเครื่องนี้ใช้ systemctl หรือไม่ (Linux ใหม่ๆ)
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null || systemctl list-units --all | grep -q "^${service}.service" 2>/dev/null; then
+            if systemctl is-active --quiet "$service"; then
+                print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
+            else
+                print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
+                ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
+            fi
+        fi
+    else
+        # หากไม่มี systemctl ให้ถอยไปใช้ระบบเก่า (Ubuntu 14.04, CentOS 6)
+        if [ -x "/etc/init.d/$service" ] || [ -f "/etc/init/$service.conf" ]; then
+            # เช็คคำว่า running, active จากผลลัพธ์ของคำสั่ง service
+            if service "$service" status 2>/dev/null | grep -qiE "running|is active|start/running"; then
+                print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
+            else
+                print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
+                ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
+            fi
         fi
     fi
 done
@@ -141,15 +156,15 @@ ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; 
     print_and_log "- Port ${CYAN}${port}${NC}: [OPEN] by ${GREEN}${service}${NC}"
 done | sort -u -t':' -k1,1n
 
-# 8. Firewall Status (เช็คทั้ง firewalld, ufw และ iptables)
+# 8. Firewall Status (เช็คตรงโดยไม่พึ่ง systemctl)
 print_and_log "\n${YELLOW}[8] Firewall Status:${NC}"
-if systemctl is-active --quiet firewalld 2>/dev/null; then
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     print_and_log "${GREEN}[ACTIVE] firewalld is running.${NC}"
     print_and_log "  -> Active Zones: $(firewall-cmd --get-active-zones | tr '\n' ' ')"
-elif systemctl is-active --quiet ufw 2>/dev/null; then
+elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
     print_and_log "${GREEN}[ACTIVE] UFW is running.${NC}"
 else
-    RULE_COUNT=$(iptables -S | grep "^-A" | wc -l)
+    RULE_COUNT=$(iptables -S 2>/dev/null | grep "^-A" | wc -l)
     if [ "$RULE_COUNT" -gt 0 ]; then
         print_and_log "${CYAN}Found $RULE_COUNT custom iptables rules:${NC}"
     else
