@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # ==============================================================================
-# Universal Post-Migration Health Check & Audit Script
-# Supported OS: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux
+# Universal Health Check, Audit & Diagnostic Script
 # ==============================================================================
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m' # สีใหม่สำหรับคำแนะนำ
 NC='\033[0m'
 
 TOTAL_ERRORS=0
@@ -28,46 +28,38 @@ fi
 echo "Post-Migration Audit Log - $(date)" > "$LOG_FILE"
 echo "=========================================" >> "$LOG_FILE"
 
-# ==========================================
-# Phase 0: OS Detection (ค้นหาว่ากำลังรันบน OS อะไร)
-# ==========================================
+# OS Detection
 if [ -f /etc/os-release ]; then
     . /etc/os-release
-    OS_NAME=$NAME
-    OS_ID=$ID
-    OS_LIKE=$ID_LIKE
+    OS_NAME=$NAME; OS_ID=$ID; OS_LIKE=$ID_LIKE
 else
-    OS_NAME=$(uname -s)
-    OS_ID="unknown"
+    OS_NAME=$(uname -s); OS_ID="unknown"
 fi
 
-# แยกตระกูล OS เพื่อใช้คำสั่งที่ถูกต้อง
 if [[ "$OS_ID" == *"ubuntu"* ]] || [[ "$OS_ID" == *"debian"* ]] || [[ "$OS_LIKE" == *"debian"* ]]; then
-    OS_FAMILY="debian"
-    ADMIN_GROUP="sudo"
-    PKG_MGR="apt-get"
+    OS_FAMILY="debian"; ADMIN_GROUP="sudo"; PKG_MGR="apt-get"
 elif [[ "$OS_ID" == *"centos"* ]] || [[ "$OS_ID" == *"rhel"* ]] || [[ "$OS_ID" == *"rocky"* ]] || [[ "$OS_ID" == *"almalinux"* ]] || [[ "$OS_LIKE" == *"rhel"* ]]; then
-    OS_FAMILY="rhel"
-    ADMIN_GROUP="wheel"
+    OS_FAMILY="rhel"; ADMIN_GROUP="wheel"
     command -v dnf >/dev/null 2>&1 && PKG_MGR="dnf" || PKG_MGR="yum"
 else
-    OS_FAMILY="unknown"
-    ADMIN_GROUP="sudo"
+    OS_FAMILY="unknown"; ADMIN_GROUP="sudo"
 fi
 
 print_and_log "${CYAN}====================================================${NC}"
-print_and_log "${CYAN}   Universal Health Check & Audit ($OS_NAME)        ${NC}"
+print_and_log "${CYAN}   Universal Health Check & Diagnostic ($OS_NAME)   ${NC}"
 print_and_log "${CYAN}====================================================${NC}"
 
 # 1. System, Load & Time
 print_and_log "\n${YELLOW}[1] System, Load Average & Time:${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: Load Average ไม่ควรสูงเกินจำนวน CPU Core ที่มี หากสูงผิดปกติ ให้ใช้คำสั่ง 'htop' หรือ 'top' เพื่อดูว่า Process ไหนกิน CPU${NC}"
 print_and_log "OS Version: $OS_NAME"
 print_and_log "Uptime & Load: $(uptime)"
 print_and_log "Kernel: $(uname -r)"
 print_and_log "Timezone: $(date)"
 
-# 2. Disk Space, Mounts & Inodes
+# 2. Disk Space & Inodes
 print_and_log "\n${YELLOW}[2] Storage & Inode Status:${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: หาก Use% เกิน 80% ควรเตรียมขยายพื้นที่. หาก Inode เต็ม (แม้ Disk จะว่าง) ระบบจะสร้างไฟล์ใหม่ไม่ได้ (มักเกิดจากไฟล์ Session หรือ Log ขยะเยอะ) ให้ใช้คำสั่ง 'ncdu /' หรือ 'du -sh /*' หาโฟลเดอร์ต้นเหตุ${NC}"
 print_and_log "${CYAN}>> Disk Space Usage:${NC}"
 print_and_log "$(df -hT | grep -v 'tmpfs\|cdrom\|squashfs')"
 print_and_log "${CYAN}>> Inode Usage (File Limits):${NC}"
@@ -75,6 +67,7 @@ print_and_log "$(df -hi | grep -v 'tmpfs\|cdrom\|squashfs')"
 
 # 3. Memory Usage
 print_and_log "\n${YELLOW}[3] Memory Usage:${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: Linux มักจะเอา RAM ที่ว่างไปทำ Cache (เป็นเรื่องปกติ) ให้ดูช่อง FREE หรือ Available เป็นหลัก หาก RAM เหลือน้อยและระบบช้า ให้พิจารณาเพิ่ม RAM บน Proxmox${NC}"
 print_and_log "$(free -m | awk '
     BEGIN { printf "  %-12s %-12s %-12s %-15s\n", "TOTAL(MB)", "USED(MB)", "FREE(MB)", "USAGE(%)" }
     NR==2 { printf "  %-12s %-12s %-12s %.2f%%\n", $2, $3, $4, $3*100/$2 }
@@ -82,6 +75,7 @@ print_and_log "$(free -m | awk '
 
 # 4. Network Check
 print_and_log "\n${YELLOW}[4] Network & Connectivity:${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: หาก Ping ไม่ผ่าน (FAILED) ให้เช็ค 1. ไฟล์คอนฟิก IP (/etc/network/interfaces หรือ netplan) 2. เช็คว่าบน Proxmox ติ๊กเลือก Bridge Network ถูกต้องหรือไม่${NC}"
 print_and_log "Default Gateway: $(ip route | grep default | awk '{print $3}' || echo 'NOT FOUND')"
 if ping -c 1 8.8.8.8 &> /dev/null; then
     print_and_log "- Internet Access: ${GREEN}[OK]${NC}"
@@ -90,8 +84,9 @@ else
     ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Network:${NC} Cannot reach internet\n"
 fi
 
-# 5. OS Patch & Update Status (แยกตามตระกูล OS)
+# 5. OS Patch & Update
 print_and_log "\n${YELLOW}[5] OS Patch & Update Status ($PKG_MGR):${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: ควรหมั่นอัปเดต Patch เพื่อปิดช่องโหว่ความปลอดภัย (คำเตือน: ก่อนรันคำสั่ง Upgrade บน Production ควรทำ Snapshot บน Proxmox ไว้ก่อนเสมอ!)${NC}"
 print_and_log "Checking for available updates... (Please wait)"
 
 if [ "$OS_FAMILY" == "debian" ]; then
@@ -105,7 +100,6 @@ if [ "$OS_FAMILY" == "debian" ]; then
         ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches\n"
     fi
 elif [ "$OS_FAMILY" == "rhel" ]; then
-    # นับจำนวนบรรทัดของแพ็กเกจที่รออัปเดต (ตัดบรรทัดว่างและ header ออก)
     UPGRADES=$($PKG_MGR check-update -q 2>/dev/null | awk 'NF' | wc -l)
     if [ "$UPGRADES" -eq 0 ]; then
         print_and_log "${GREEN}[OK] OS is up-to-date.${NC}"
@@ -118,12 +112,12 @@ else
     print_and_log "${YELLOW}[SKIP] Unsupported OS for automatic update check.${NC}"
 fi
 
-# 6. Service Health Check (รองรับทั้ง systemd และ SysVinit)
+# 6. Service Health Check
 print_and_log "\n${YELLOW}[6] Service Health Check:${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: หาก Service สำคัญสถานะเป็น FAILED ให้ดู Log ความผิดพลาดด้วยคำสั่ง 'journalctl -xeu <ชื่อ service>' หรือไปดูในโฟลเดอร์ /var/log/${NC}"
 SERVICES=("ssh" "sshd" "nginx" "apache2" "httpd" "mysql" "mariadb" "docker")
 
 for service in "${SERVICES[@]}"; do
-    # ตรวจสอบว่าเครื่องนี้ใช้ systemctl หรือไม่ (Linux ใหม่ๆ)
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null || systemctl list-units --all | grep -q "^${service}.service" 2>/dev/null; then
             if systemctl is-active --quiet "$service"; then
@@ -134,9 +128,7 @@ for service in "${SERVICES[@]}"; do
             fi
         fi
     else
-        # หากไม่มี systemctl ให้ถอยไปใช้ระบบเก่า (Ubuntu 14.04, CentOS 6)
         if [ -x "/etc/init.d/$service" ] || [ -f "/etc/init/$service.conf" ]; then
-            # เช็คคำว่า running, active จากผลลัพธ์ของคำสั่ง service
             if service "$service" status 2>/dev/null | grep -qiE "running|is active|start/running"; then
                 print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
             else
@@ -149,6 +141,7 @@ done
 
 # 7. Active Ports Check
 print_and_log "\n${YELLOW}[7] Active Listening Ports & Services:${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: ตรวจสอบว่ามี Port แปลกปลอมเปิดอยู่หรือไม่ หากพบ Service ที่ไม่รู้จักเปิดรอรับการเชื่อมต่อ อาจเป็นความเสี่ยงด้านความปลอดภัย${NC}"
 ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; do
     port=$(echo "$address" | awk -F':' '{print $NF}')
     service=$(echo "$process" | awk -F'"' '{print $2}')
@@ -156,8 +149,9 @@ ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; 
     print_and_log "- Port ${CYAN}${port}${NC}: [OPEN] by ${GREEN}${service}${NC}"
 done | sort -u -t':' -k1,1n
 
-# 8. Firewall Status (เช็คตรงโดยไม่พึ่ง systemctl)
+# 8. Firewall Status
 print_and_log "\n${YELLOW}[8] Firewall Status:${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: ระวังอย่า Block Port 22 (SSH) เด็ดขาด ไม่เช่นนั้นจะรีโมทเข้าเครื่องไม่ได้ (หากพลาดโดนบล็อก ต้องไปแก้ผ่านหน้าจอ Console ของ Proxmox เท่านั้น)${NC}"
 if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     print_and_log "${GREEN}[ACTIVE] firewalld is running.${NC}"
     print_and_log "  -> Active Zones: $(firewall-cmd --get-active-zones | tr '\n' ' ')"
@@ -174,6 +168,7 @@ fi
 
 # 9. Security Audit: Users & Privileges
 print_and_log "\n${YELLOW}[9] Security Audit (Users & Access):${NC}"
+print_and_log "${MAGENTA}💡 ADVICE: ควรมีเฉพาะ User ที่จำเป็นเท่านั้นที่อยู่ในกลุ่ม Admin ($ADMIN_GROUP) และเพื่อความปลอดภัยสูงสุด แนะนำให้ปิดการ Login ด้วย Password และเปลี่ยนไปใช้ SSH Key แทน${NC}"
 print_and_log "${CYAN}>> Interactive Users:${NC}"
 awk -F: '($3>=1000 || $1=="root") && $7 !~ /(nologin|false)$/ {print " - " $1}' /etc/passwd | while read -r line; do print_and_log "$line"; done
 
