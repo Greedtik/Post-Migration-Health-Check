@@ -7,7 +7,6 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# ตัวแปรสำหรับเก็บผลสรุป
 TOTAL_ERRORS=0
 SUMMARY_MSG=""
 
@@ -40,11 +39,8 @@ fi
 
 # 5. Check Critical Services
 echo -e "\n${YELLOW}[5] Service Status:${NC}"
-# กัปตันสามารถเพิ่มหรือลดชื่อ Service ในวงเล็บนี้ได้เลยครับ
-SERVICES=("ssh" "nginx" "apache2" "mysql" "mariadb" "docker" "postfix")
-
+SERVICES=("ssh" "nginx" "apache2" "mysql" "docker")
 for service in "${SERVICES[@]}"; do
-    # เช็คว่ามี Service นี้ติดตั้งอยู่ไหม
     if systemctl list-unit-files | grep -q "^${service}.service"; then
         if systemctl is-active --quiet "$service"; then
             echo -e "- $service: ${GREEN}[RUNNING]${NC}"
@@ -56,12 +52,23 @@ for service in "${SERVICES[@]}"; do
     fi
 done
 
-# 6. Check Listening Ports
-echo -e "\n${YELLOW}[6] Active Listening Ports:${NC}"
-ss -tulpn | grep LISTEN | awk '{print $5, $7}' | sed 's/.*://' | column -t
+# 6. Check Specific Listening Ports (อัปเดตใหม่)
+echo -e "\n${YELLOW}[6] Critical Ports Check:${NC}"
+# กัปตันสามารถแก้ไขเลข Port ที่ต้องการเช็คได้ที่บรรทัดนี้ครับ
+PORTS_TO_CHECK=(22 80 443 3306)
+
+for port in "${PORTS_TO_CHECK[@]}"; do
+    # ใช้ ss ตรวจสอบว่ามี Port นี้อยู่ในสถานะ LISTEN หรือไม่
+    if ss -tulpn | grep -q ":${port} "; then
+        echo -e "- Port $port: ${GREEN}[LISTENING]${NC}"
+    else
+        # แจ้งเตือนสีแดง แต่เราจะไม่นับเป็น Error ร้ายแรงใน Summary เผื่อว่าเครื่องนี้ไม่ได้ใช้พอร์ตนั้นครับ
+        echo -e "- Port $port: ${RED}[CLOSED]${NC} (No service listening)"
+    fi
+done
 
 # ==========================================
-# 7. EXECUTIVE SUMMARY (ส่วนที่เพิ่มใหม่)
+# 7. EXECUTIVE SUMMARY
 # ==========================================
 echo -e "\n${CYAN}==============================================${NC}"
 echo -e "${CYAN}             EXECUTIVE SUMMARY                ${NC}"
