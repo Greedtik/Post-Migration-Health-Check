@@ -46,7 +46,11 @@ print_and_log "$(df -hi | grep -v 'tmpfs\|cdrom')"
 
 # 3. Memory Usage
 print_and_log "\n${YELLOW}[3] Memory Usage:${NC}"
-print_and_log "$(free -m | awk 'NR==1{print "             " $0} NR==2{printf "RAM Usage:   %-10s %-10s %-10s (%.2f%% used)\n", $2, $3, $4, $3*100/$2 }')"
+print_and_log "$(free -m | awk '
+    BEGIN { printf "  %-12s %-12s %-12s %-15s\n", "TOTAL(MB)", "USED(MB)", "FREE(MB)", "USAGE(%)" }
+    NR==2 { printf "  %-12s %-12s %-12s %.2f%%\n", $2, $3, $4, $3*100/$2 }
+')"
+
 
 # 4. Network Check
 print_and_log "\n${YELLOW}[4] Network & Connectivity:${NC}"
