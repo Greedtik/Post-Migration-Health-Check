@@ -72,8 +72,8 @@ OS_CODENAME=$(grep -Po 'VERSION="[0-9]+ \(\K[^)]+' /etc/os-release 2>/dev/null |
 if [ "$OS_CODENAME" == "jessie" ] && ! grep -q "archive.debian.org" /etc/apt/sources.list; then
     print_and_log "${RED}[FAILED] Debian 8 (Jessie) is End-Of-Life (EOL). Default APT repos will return 404.${NC}"
     print_and_log "  -> ${YELLOW}Fix Recommendation:${NC} Run these commands to switch to the Archive repo:"
-    print_and_log "     ${CYAN}echo \"deb http://archive.debian.org/debian/ jessie main non-free contrib\" > /etc/apt/sources.list${NC}"
-    print_and_log "     ${CYAN}echo \"deb http://archive.debian.org/debian-security/ jessie/updates main non-free contrib\" >> /etc/apt/sources.list${NC}"
+    print_and_log "     ${CYAN}echo \"deb [trusted=yes] http://archive.debian.org/debian/ jessie main non-free contrib\" > /etc/apt/sources.list${NC}"
+    print_and_log "     ${CYAN}echo \"deb [trusted=yes] http://archive.debian.org/debian-security/ jessie/updates main non-free contrib\" >> /etc/apt/sources.list${NC}"
     print_and_log "     ${CYAN}echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99no-check-valid-until${NC}"
     print_and_log "     ${CYAN}apt-get update${NC}"
     ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Update:${NC} APT sources.list is broken (Debian 8 EOL)\n"
