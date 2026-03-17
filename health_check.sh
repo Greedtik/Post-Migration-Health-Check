@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# Post-Migration Health Check & Audit (Enterprise Edition)
+# Post-Migration Health Check & Audit (Enterprise v2)
 # ==========================================
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -10,6 +10,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 TOTAL_ERRORS=0
+TOTAL_WARNINGS=0
 SUMMARY_MSG=""
 LOG_FILE="/var/log/migration_audit_$(date +%F_%H-%M).log"
 
@@ -36,7 +37,7 @@ print_and_log "Uptime & Load: $(uptime)"
 print_and_log "Kernel: $(uname -r)"
 print_and_log "Timezone: $(date)"
 
-# 2. Disk Space, Mounts & Inodes (อัปเดตเพิ่ม Inodes)
+# 2. Disk Space, Mounts & Inodes
 print_and_log "\n${YELLOW}[2] Storage & Inode Status:${NC}"
 print_and_log "${CYAN}>> Disk Space Usage:${NC}"
 print_and_log "$(df -hT | grep -v 'tmpfs\|cdrom')"
@@ -54,11 +55,29 @@ if ping -c 1 8.8.8.8 &> /dev/null; then
     print_and_log "- Internet Access: ${GREEN}[OK]${NC}"
 else
     print_and_log "- Internet Access: ${RED}[FAILED]${NC}"
-    ((TOTAL_ERRORS++)); SUMMARY_MSG+="- Network: Cannot reach internet\n"
+    ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Network:${NC} Cannot reach internet\n"
 fi
 
-# 5. Package Manager & System Health (ใหม่! เช็คความสมบูรณ์ของ OS)
-print_and_log "\n${YELLOW}[5] APT Package Manager Health:${NC}"
+# 5. OS Patch & Update Status (ใหม่ล่าสุด!)
+print_and_log "\n${YELLOW}[5] OS Patch & Update Status (APT):${NC}"
+print_and_log "Checking for available updates... (Please wait)"
+# อัปเดตรายการจาก Repo แบบเงียบๆ (ใส่ timeout กันค้างกรณีเน็ตมีปัญหา)
+timeout 15 apt-get update -qq 2>/dev/null
+
+# นับจำนวนแพ็กเกจที่รออัปเกรด
+UPGRADES=$(apt-get -s upgrade 2>/dev/null | grep -Po '^\d+(?= upgraded)' || echo "0")
+
+if [ "$UPGRADES" -eq 0 ]; then
+    print_and_log "${GREEN}[OK] OS is up-to-date. No pending patches.${NC}"
+else
+    print_and_log "${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"
+    print_and_log "  -> To see the list, run: ${CYAN}apt-get -s upgrade${NC}"
+    print_and_log "  -> To install updates, run: ${CYAN}apt-get upgrade${NC}"
+    ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches need to be installed\n"
+fi
+
+# 6. APT Package Manager Health
+print_and_log "\n${YELLOW}[6] APT Package Manager Health:${NC}"
 BROKEN_PKGS=$(dpkg -l | grep "^rc" | wc -l)
 if [ "$BROKEN_PKGS" -gt 0 ]; then
     print_and_log "${YELLOW}[WARNING] Found $BROKEN_PKGS leftover config files from removed packages.${NC}"
@@ -67,8 +86,8 @@ else
     print_and_log "${GREEN}[OK] Package manager state is clean.${NC}"
 fi
 
-# 6. Service Health Check
-print_and_log "\n${YELLOW}[6] Service Health Check:${NC}"
+# 7. Service Health Check
+print_and_log "\n${YELLOW}[7] Service Health Check:${NC}"
 SERVICES=("ssh" "nginx" "apache2" "mysql" "mariadb" "docker")
 for service in "${SERVICES[@]}"; do
     if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null; then
@@ -76,13 +95,13 @@ for service in "${SERVICES[@]}"; do
             print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
         else
             print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
-            ((TOTAL_ERRORS++)); SUMMARY_MSG+="- Service: $service is down\n"
+            ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
         fi
     fi
 done
 
-# 7. Active Ports Check
-print_and_log "\n${YELLOW}[7] Active Listening Ports & Services:${NC}"
+# 8. Active Ports Check
+print_and_log "\n${YELLOW}[8] Active Listening Ports & Services:${NC}"
 ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; do
     port=$(echo "$address" | awk -F':' '{print $NF}')
     service=$(echo "$process" | awk -F'"' '{print $2}')
@@ -90,8 +109,8 @@ ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; 
     print_and_log "- Port ${CYAN}${port}${NC}: [OPEN] by ${GREEN}${service}${NC}"
 done | sort -u -t':' -k1,1n
 
-# 8. Firewall Rules
-print_and_log "\n${YELLOW}[8] Detailed Firewall Rules (iptables):${NC}"
+# 9. Firewall Rules
+print_and_log "\n${YELLOW}[9] Detailed Firewall Rules (iptables):${NC}"
 RULE_COUNT=$(iptables -S | grep "^-A" | wc -l)
 if [ "$RULE_COUNT" -gt 0 ]; then
     print_and_log "${CYAN}Found $RULE_COUNT custom iptables rules:${NC}"
@@ -102,27 +121,14 @@ else
     print_and_log "${GREEN}No custom iptables rules found. (System is using default policies)${NC}"
 fi
 
-# 9. Security Audit: Users & Privileges (ใหม่! เช็คคนมีสิทธิ์เข้าเครื่อง)
-print_and_log "\n${YELLOW}[9] Security Audit (Users & Access):${NC}"
+# 10. Security Audit: Users & Privileges
+print_and_log "\n${YELLOW}[10] Security Audit (Users & Access):${NC}"
 print_and_log "${CYAN}>> Users with interactive shell access:${NC}"
-# กรองเอาเฉพาะ user ที่ล็อกอินได้ (มี bash/sh)
 awk -F: '($3>=1000 || $1=="root") && $7 !~ /(nologin|false)$/ {print " - " $1}' /etc/passwd | while read -r line; do print_and_log "$line"; done
 
 print_and_log "${CYAN}>> Users in 'sudo' group:${NC}"
 SUDO_USERS=$(grep -Po '^sudo.+:\K.*$' /etc/group)
 print_and_log " - ${SUDO_USERS:-None}"
-
-# 10. Background Tasks (ใหม่! แอบดูสคริปต์ตั้งเวลา)
-print_and_log "\n${YELLOW}[10] Scheduled Tasks (Root Crontab):${NC}"
-CRON_COUNT=$(crontab -l -u root 2>/dev/null | grep -v "^#" | grep -v "^$" | wc -l)
-if [ "$CRON_COUNT" -gt 0 ]; then
-    print_and_log "${CYAN}Found $CRON_COUNT active root cron jobs:${NC}"
-    crontab -l -u root 2>/dev/null | grep -v "^#" | grep -v "^$" | while read -r cron; do
-        print_and_log "  -> $cron"
-    done
-else
-    print_and_log "${GREEN}No custom root cron jobs found.${NC}"
-fi
 
 # ==========================================
 # 11. EXECUTIVE SUMMARY
@@ -131,13 +137,18 @@ print_and_log "\n${CYAN}====================================================${NC
 print_and_log "${CYAN}                 EXECUTIVE SUMMARY                  ${NC}"
 print_and_log "${CYAN}====================================================${NC}"
 
-if [ $TOTAL_ERRORS -eq 0 ]; then
+if [ $TOTAL_ERRORS -eq 0 ] && [ $TOTAL_WARNINGS -eq 0 ]; then
     print_and_log "${GREEN}[PASS] All critical systems are healthy!${NC}"
-    print_and_log "The server has successfully migrated and is secure."
+    print_and_log "The server is fully updated, secure, and running perfectly."
+elif [ $TOTAL_ERRORS -eq 0 ] && [ $TOTAL_WARNINGS -gt 0 ]; then
+    print_and_log "${YELLOW}[WARNING] Systems are healthy, but needs attention. ($TOTAL_WARNINGS warnings)${NC}"
+    print_and_log "Please review the following notices:"
+    print_and_log -n "$SUMMARY_MSG"
 else
-    print_and_log "${RED}[FAIL] Health check found $TOTAL_ERRORS critical issue(s).${NC}"
-    print_and_log "Please review the following errors:"
+    print_and_log "${RED}[FAIL] Health check found $TOTAL_ERRORS critical issue(s) and $TOTAL_WARNINGS warning(s).${NC}"
+    print_and_log "Please review the following errors immediately:"
     print_and_log -n "$SUMMARY_MSG"
 fi
+
 print_and_log "\n${CYAN}>> Report saved to: ${LOG_FILE}${NC}"
 print_and_log "${CYAN}====================================================${NC}\n"
