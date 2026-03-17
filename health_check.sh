@@ -1,133 +1,137 @@
 #!/bin/bash
 
 # ==========================================
-# Post-Migration Health Check Script (Ultimate)
+# Post-Migration Health Check & Audit (Pro Edition)
 # ==========================================
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 TOTAL_ERRORS=0
 SUMMARY_MSG=""
+LOG_FILE="/var/log/migration_audit_$(date +%F_%H-%M).log"
 
-# เช็คสิทธิ์ Root ก่อนรัน (สำคัญมากสำหรับการดู iptables และ logs)
+# ฟังก์ชันสำหรับปริ้นท์ลงจอและเซฟลงไฟล์พร้อมกัน
+print_and_log() {
+    echo -e "$1"
+    echo -e "$1" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2})?)?[mGK]//g" >> "$LOG_FILE"
+}
+
 if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}Please run this script as root (use: sudo ./health_check.sh)${NC}"
   exit
 fi
 
-echo -e "${CYAN}====================================================${NC}"
-echo -e "${CYAN}   Post-Migration Health Check & Audit (Debian 8)   ${NC}"
-echo -e "${CYAN}====================================================${NC}"
+# เริ่มเขียนลงไฟล์ Log
+echo "Post-Migration Audit Log - $(date)" > "$LOG_FILE"
+echo "=========================================" >> "$LOG_FILE"
+
+print_and_log "${CYAN}====================================================${NC}"
+print_and_log "${CYAN}   Post-Migration Health Check & Audit (Debian 8)   ${NC}"
+print_and_log "${CYAN}====================================================${NC}"
 
 # 1. System, Load & Time
-echo -e "\n${YELLOW}[1] System, Load Average & Time:${NC}"
-uptime
-echo -n "Kernel: "; uname -r
-echo -n "Timezone: "; date
-echo -e "${CYAN}>> Hardware Details:${NC}"
-lscpu | grep "^CPU(s):" | sed 's/  */ /g'
+print_and_log "\n${YELLOW}[1] System, Load Average & Time:${NC}"
+print_and_log "$(uptime)"
+print_and_log "Kernel: $(uname -r)"
+print_and_log "Timezone: $(date)"
 
-# 2. Disk Space, Mounts & Swap
-echo -e "\n${YELLOW}[2] Storage & Swap Status:${NC}"
-echo -e "${CYAN}>> Filesystem Usage:${NC}"
-df -hT | grep -v 'tmpfs\|cdrom'
-echo -e "${CYAN}>> Swap Status:${NC}"
-swapon --show || echo "No Swap active"
+# 2. Disk Space & Mounts
+print_and_log "\n${YELLOW}[2] Storage Status:${NC}"
+print_and_log "$(df -hT | grep -v 'tmpfs\|cdrom')"
 
-# 3. Memory Usage (Detailed)
-echo -e "\n${YELLOW}[3] Memory Usage:${NC}"
-free -m | awk 'NR==1{print "             " $0} NR==2{printf "RAM Usage:   %-10s %-10s %-10s (%.2f%% used)\n", $2, $3, $4, $3*100/$2 }'
+# 3. Memory Usage
+print_and_log "\n${YELLOW}[3] Memory Usage:${NC}"
+print_and_log "$(free -m | awk 'NR==1{print "             " $0} NR==2{printf "RAM Usage:   %-10s %-10s %-10s (%.2f%% used)\n", $2, $3, $4, $3*100/$2 }')"
 
-# 4. Network & DNS Resolution
-echo -e "\n${YELLOW}[4] Network & Connectivity:${NC}"
-echo -e "${CYAN}>> Default Gateway:${NC}"
-ip route | grep default || echo "${RED}No default gateway found!${NC}"
-
-echo -e "${CYAN}>> Internet & DNS Check:${NC}"
+# 4. Network Check
+print_and_log "\n${YELLOW}[4] Network & Connectivity:${NC}"
+print_and_log "Default Gateway: $(ip route | grep default | awk '{print $3}' || echo 'NOT FOUND')"
 if ping -c 1 8.8.8.8 &> /dev/null; then
-    echo -e "- External IP Ping (8.8.8.8): ${GREEN}[OK]${NC}"
+    print_and_log "- Internet Access: ${GREEN}[OK]${NC}"
 else
-    echo -e "- External IP Ping (8.8.8.8): ${RED}[FAILED]${NC}"
-    ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Network:${NC} Cannot reach internet\n"
+    print_and_log "- Internet Access: ${RED}[FAILED]${NC}"
+    ((TOTAL_ERRORS++)); SUMMARY_MSG+="- Network: Cannot reach internet\n"
 fi
 
-if ping -c 1 google.com &> /dev/null; then
-    echo -e "- DNS Resolution (google.com): ${GREEN}[OK]${NC}"
+# 5. Cloud-Init State Check (อัปเดตใหม่รองรับ Proxmox)
+print_and_log "\n${YELLOW}[5] Cloud-Init Status Check:${NC}"
+if dpkg -l | grep -qw cloud-init; then
+    print_and_log "${GREEN}[OK] 'cloud-init' is installed and ready for Proxmox.${NC}"
+    
+    # เช็คว่ามีโฟลเดอร์ร่องรอยของ OpenStack/EC2 ค้างอยู่ไหม
+    if [ -d /var/lib/cloud/instances/ ]; then
+        print_and_log "${YELLOW}  -> [NOTE] Old cloud instance data found.${NC}"
+        print_and_log "  -> If boot is slow, run: ${CYAN}sudo cloud-init clean --logs${NC}"
+    else
+        print_and_log "  -> State is clean."
+    fi
 else
-    echo -e "- DNS Resolution (google.com): ${RED}[FAILED]${NC}"
-    ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- DNS:${NC} Cannot resolve domain names\n"
+    print_and_log "${YELLOW}[WARNING] 'cloud-init' is NOT installed.${NC}"
+    print_and_log "  -> You will not be able to use Proxmox Cloud-Init features."
 fi
 
-# 5. Service Health (Targeted & Global)
-echo -e "\n${YELLOW}[5] Service Health Check:${NC}"
-echo -e "${CYAN}>> Target Services:${NC}"
-SERVICES=("ssh" "nginx" "apache2" "mysql" "mariadb" "docker" "postfix")
+# 6. Service Health Check
+print_and_log "\n${YELLOW}[6] Service Health Check:${NC}"
+SERVICES=("ssh" "nginx" "apache2" "mysql" "mariadb" "docker")
 for service in "${SERVICES[@]}"; do
     if systemctl list-unit-files | grep -q "^${service}.service"; then
         if systemctl is-active --quiet "$service"; then
-            echo -e "- $service: ${GREEN}[RUNNING]${NC}"
+            print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
         else
-            echo -e "- $service: ${RED}[STOPPED/FAILED]${NC}"
-            ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
+            print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
+            ((TOTAL_ERRORS++)); SUMMARY_MSG+="- Service: $service is down\n"
         fi
     fi
 done
 
-echo -e "${CYAN}>> Global Failed Services (systemd):${NC}"
-FAILED_SVC=$(systemctl --failed --plain --no-legend | wc -l)
-if [ "$FAILED_SVC" -gt 0 ]; then
-    echo -e "${RED}Found $FAILED_SVC failed systemd service(s):${NC}"
-    systemctl --failed --plain --no-legend | awk '{print "   - " $1}'
-    ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- System:${NC} $FAILED_SVC background service(s) failed to start\n"
-else
-    echo -e "${GREEN}No failed background services.${NC}"
-fi
-
-# 6. Active Ports (Dynamic)
-echo -e "\n${YELLOW}[6] Active Listening Ports & Services:${NC}"
+# 7. Active Ports Check
+print_and_log "\n${YELLOW}[7] Active Listening Ports & Services:${NC}"
 ss -tulpn | grep LISTEN | awk '{print $5, $7}' | while read -r address process; do
     port=$(echo "$address" | awk -F':' '{print $NF}')
     service=$(echo "$process" | awk -F'"' '{print $2}')
     [ -z "$service" ] && service="Unknown/System"
-    echo -e "- Port ${CYAN}${port}${NC}: [OPEN] by ${GREEN}${service}${NC}"
+    print_and_log "- Port ${CYAN}${port}${NC}: [OPEN] by ${GREEN}${service}${NC}"
 done | sort -u -t':' -k1,1n
 
-# 7. Firewall & Security (New!)
-echo -e "\n${YELLOW}[7] Firewall Configuration (iptables/ufw):${NC}"
-echo -e "${CYAN}>> UFW Status:${NC}"
-if command -v ufw >/dev/null 2>&1; then
-    ufw status | head -n 4
+# 8. Firewall Full Rules (ตามที่กัปตันขอ: กาง Rule ออกมาให้หมด)
+print_and_log "\n${YELLOW}[8] Detailed Firewall Rules (iptables):${NC}"
+RULE_COUNT=$(iptables -S | grep "^-A" | wc -l)
+if [ "$RULE_COUNT" -gt 0 ]; then
+    print_and_log "${CYAN}Found $RULE_COUNT custom iptables rules:${NC}"
+    # ดึง rules ออกมาแสดง แต่ตัดพวก default chain ทิ้งเพื่อไม่ให้รก
+    iptables-save | grep -v '^#' | grep -v '^:' | while read -r rule; do
+        print_and_log "  -> $rule"
+    done
 else
-    echo "UFW is not installed or not found."
+    print_and_log "${GREEN}No custom iptables rules found. (System is using default policies)${NC}"
+    iptables -S | grep "^-P" | awk '{print "  -> Policy " $2 ": " $3}' | while read -r p; do print_and_log "$p"; done
 fi
 
-echo -e "${CYAN}>> iptables Default Policies:${NC}"
-# แสดงเฉพาะนโยบายหลัก (ACCEPT/DROP) จะได้ไม่รกหน้าจอเกินไป
-iptables -S | grep "^-P" | awk '{print " - Chain " $2 ": " $3}'
-RULE_COUNT=$(iptables -S | grep "^-A" | wc -l)
-echo -e " - Total custom rules applied: ${CYAN}$RULE_COUNT rules${NC}"
+# 9. SSH Security Posture (ไอเดียใหม่: เช็คความปลอดภัย)
+print_and_log "\n${YELLOW}[9] SSH Security Posture:${NC}"
+ROOT_SSH=$(sshd -T 2>/dev/null | grep "^permitrootlogin" | awk '{print $2}')
+PASS_SSH=$(sshd -T 2>/dev/null | grep "^passwordauthentication" | awk '{print $2}')
 
-# 8. Kernel & Hardware Errors (New!)
-echo -e "\n${YELLOW}[8] Recent Kernel/Hardware Errors (dmesg):${NC}"
-# เช็ค Log ของระบบว่ามีบ่นเรื่อง Hardware/Driver ตอนบูทบน Proxmox ไหม
-dmesg | grep -i "error\|critical\|failed" | tail -n 5 | sed 's/^/ - /' || echo -e "${GREEN}No critical hardware errors found in recent logs.${NC}"
+print_and_log " - Root Login Allowed: $(if [ "$ROOT_SSH" = "yes" ]; then echo -e "${RED}YES (High Risk)${NC}"; else echo -e "${GREEN}NO${NC}"; fi)"
+print_and_log " - Password Auth Allowed: $(if [ "$PASS_SSH" = "yes" ]; then echo -e "${YELLOW}YES (Consider using Keys)${NC}"; else echo -e "${GREEN}NO${NC}"; fi)"
 
 # ==========================================
-# 9. EXECUTIVE SUMMARY
+# 10. EXECUTIVE SUMMARY
 # ==========================================
-echo -e "\n${CYAN}====================================================${NC}"
-echo -e "${CYAN}                 EXECUTIVE SUMMARY                  ${NC}"
-echo -e "${CYAN}====================================================${NC}"
+print_and_log "\n${CYAN}====================================================${NC}"
+print_and_log "${CYAN}                 EXECUTIVE SUMMARY                  ${NC}"
+print_and_log "${CYAN}====================================================${NC}"
 
 if [ $TOTAL_ERRORS -eq 0 ]; then
-    echo -e "${GREEN}[PASS] All critical systems are healthy!${NC}"
-    echo -e "The server has successfully migrated and is running perfectly."
+    print_and_log "${GREEN}[PASS] All critical systems are healthy!${NC}"
+    print_and_log "The server has successfully migrated."
 else
-    echo -e "${RED}[FAIL] Health check found $TOTAL_ERRORS critical issue(s).${NC}"
-    echo -e "Please review the following errors:"
-    echo -e -n "$SUMMARY_MSG"
+    print_and_log "${RED}[FAIL] Health check found $TOTAL_ERRORS critical issue(s).${NC}"
+    print_and_log "Please review the following errors:"
+    print_and_log -n "$SUMMARY_MSG"
 fi
-echo -e "${CYAN}====================================================${NC}\n"
+print_and_log "\n${CYAN}>> Report saved to: ${LOG_FILE}${NC}"
+print_and_log "${CYAN}====================================================${NC}\n"
