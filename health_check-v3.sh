@@ -140,9 +140,20 @@ fi
 print_and_log "\n${YELLOW}[7] Core OS Services Health:${NC}"
 SERVICES=("sshd" "nginx" "apache2" "httpd" "mysql" "mariadb" "php-fpm")
 for service in "${SERVICES[@]}"; do
-    if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null; then
-        if systemctl is-active --quiet "$service"; then
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null || systemctl list-units --all | grep -q "^${service}.service" 2>/dev/null; then
+            if systemctl is-active --quiet "$service"; then
+                print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
+            else
+                print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
+                ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
+            fi
+        fi
+    elif command -v service >/dev/null 2>&1; then
+        if service "$service" status 2>/dev/null | grep -qiE "running|is active|start/running"; then
             print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
+        elif service "$service" status 2>/dev/null | grep -qiE "unrecognized|not found"; then
+            : # Service doesn't exist, do nothing silently
         else
             print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
             ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
@@ -241,13 +252,28 @@ fi
 
 # 10.5 Docker Containers
 print_and_log "${CYAN}>> Docker Containers:${NC}"
-if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
-    DOCKER_COUNT=$(docker ps -q 2>/dev/null | wc -l)
-    if [ "$DOCKER_COUNT" -gt 0 ]; then
-        print_and_log " - Found $DOCKER_COUNT running container(s):"
-        docker ps --format "   - {{.Names}} ({{.Image}})" | while read -r line; do print_and_log "$line"; done
+if command -v docker >/dev/null 2>&1; then
+    # เช็คว่า Docker daemon รันอยู่ไหม โดยรองรับทั้ง systemctl และ service
+    DOCKER_IS_RUNNING=0
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet docker; then
+        DOCKER_IS_RUNNING=1
+    elif command -v service >/dev/null 2>&1 && service docker status 2>/dev/null | grep -qi "running"; then
+        DOCKER_IS_RUNNING=1
+    elif docker info >/dev/null 2>&1; then
+        # Fallback ขั้นสุด: ลองยิงคำสั่ง docker info ตรงๆ
+        DOCKER_IS_RUNNING=1
+    fi
+
+    if [ "$DOCKER_IS_RUNNING" -eq 1 ]; then
+        DOCKER_COUNT=$(docker ps -q 2>/dev/null | wc -l)
+        if [ "$DOCKER_COUNT" -gt 0 ]; then
+            print_and_log " - Found $DOCKER_COUNT running container(s):"
+            docker ps --format "   - {{.Names}} ({{.Image}})" | while read -r line; do print_and_log "$line"; done
+        else
+            print_and_log " - Docker is running, but 0 active containers."
+        fi
     else
-        print_and_log " - Docker is running, but 0 active containers."
+        print_and_log " - Docker is installed but ${RED}[STOPPED]${NC}."
     fi
 else
     print_and_log " - Docker not active or not installed."
