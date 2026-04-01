@@ -39,12 +39,12 @@
 **ใช้ `curl` (สำหรับ Ubuntu/Debian):**
 รันจาก Git Repository โดยตรง (ไม่ต้อง Clone)
 ```bash
-curl -sL https://raw.githubusercontent.com/Greedtik/Post-Migration-Health-Check/refs/heads/main/health_check-v3.sh | bash
+curl -sL https://raw.githubusercontent.com/Greedtik/Migration-Health-Check/refs/heads/main/health_check-v3.sh | bash
 
 ```
 ```
 ใช้ wget (สำหรับ RHEL/CentOS):
-wget -qO- https://raw.githubusercontent.com/Greedtik/Post-Migration-Health-Check/refs/heads/main/health_check-v3.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/Greedtik/Migration-Health-Check/refs/heads/main/health_check-v3.sh | sudo bash
 ```
 
 ## รายงานผล (Output & Logs)
