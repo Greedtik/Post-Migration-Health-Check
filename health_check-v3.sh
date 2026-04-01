@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Enterprise Post-Migration Health Check & Audit Script (v3.0 - Blind Audit)
+# Enterprise Post-Migration Health Check & Audit Script (v4.0 - Deep Blind Audit)
 # Supported OS: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux
 # ==============================================================================
 GREEN='\033[0;32m'
@@ -176,19 +176,16 @@ else
 fi
 
 # ==========================================
-# 10. Deep Application Discovery (Blind Audit v4)
+# 10. Deep Application Discovery (Blind Audit)
 # ==========================================
 print_and_log "\n${YELLOW}[10] Deep Application Discovery (Scanning for hidden/enterprise apps):${NC}"
 
-# 10.1 Enterprise Suites & Mail Servers (Zimbra, GitLab, cPanel, etc.)
+# 10.1 Enterprise Suites & Mail Servers
 print_and_log "${CYAN}>> Enterprise Suites & Control Panels:${NC}"
 FOUND_ENTERPRISE=0
-
-# เช็ค Zimbra Mail
 if [ -d "/opt/zimbra" ] && id "zimbra" &>/dev/null; then
     print_and_log " - ${GREEN}Zimbra Collaboration Suite${NC} detected (/opt/zimbra)"
     FOUND_ENTERPRISE=1
-    # พยายามเช็คสถานะผ่าน zmcontrol (timeout ป้องกันสคริปต์ค้าง)
     ZIMBRA_STATUS=$(su - zimbra -c "timeout 10 zmcontrol status" 2>/dev/null)
     if echo "$ZIMBRA_STATUS" | grep -q "Stopped"; then
         print_and_log "   ${RED}-> WARNING: Some Zimbra services are STOPPED!${NC}"
@@ -196,33 +193,15 @@ if [ -d "/opt/zimbra" ] && id "zimbra" &>/dev/null; then
     elif echo "$ZIMBRA_STATUS" | grep -q "Running"; then
         print_and_log "   -> All Zimbra core services are ${GREEN}[RUNNING]${NC}"
     else
-        print_and_log "   -> Could not determine exact Zimbra status (check manually using 'zmcontrol status')"
+        print_and_log "   -> Could not determine exact Zimbra status (check manually using 'su - zimbra -c \"zmcontrol status\"')"
     fi
 fi
+if [ -d "/usr/local/cpanel" ]; then print_and_log " - ${GREEN}cPanel/WHM${NC} detected"; FOUND_ENTERPRISE=1; fi
+if [ -d "/usr/local/directadmin" ]; then print_and_log " - ${GREEN}DirectAdmin${NC} detected"; FOUND_ENTERPRISE=1; fi
+if command -v gitlab-ctl >/dev/null 2>&1 || [ -d "/opt/gitlab" ]; then print_and_log " - ${GREEN}GitLab Enterprise/CE${NC} detected"; FOUND_ENTERPRISE=1; fi
+if [ $FOUND_ENTERPRISE -eq 0 ]; then print_and_log " - No major control panels or enterprise suites detected."; fi
 
-# เช็ค cPanel / WHM
-if [ -d "/usr/local/cpanel" ]; then
-    print_and_log " - ${GREEN}cPanel/WHM${NC} detected"
-    FOUND_ENTERPRISE=1
-fi
-
-# เช็ค DirectAdmin
-if [ -d "/usr/local/directadmin" ]; then
-    print_and_log " - ${GREEN}DirectAdmin${NC} detected"
-    FOUND_ENTERPRISE=1
-fi
-
-# เช็ค GitLab
-if command -v gitlab-ctl >/dev/null 2>&1 || [ -d "/opt/gitlab" ]; then
-    print_and_log " - ${GREEN}GitLab Enterprise/CE${NC} detected"
-    FOUND_ENTERPRISE=1
-fi
-
-if [ $FOUND_ENTERPRISE -eq 0 ]; then
-    print_and_log " - No major control panels or enterprise suites (Zimbra/cPanel/GitLab) detected."
-fi
-
-# 10.2 /opt Directory Scanner (แหล่งซ่อนตัวของ Third-Party Apps)
+# 10.2 /opt Directory Scanner
 print_and_log "${CYAN}>> Third-Party Apps in /opt (Non-Standard Installations):${NC}"
 OPT_APPS=$(find /opt -maxdepth 1 -mindepth 1 -type d -exec basename {} \; 2>/dev/null | grep -vE "^(cni|containerd|zimbra)$")
 if [ -n "$OPT_APPS" ]; then
@@ -232,10 +211,9 @@ else
     print_and_log " - No additional apps found in /opt."
 fi
 
-# 10.3 Background Service Users (แอปที่สร้าง User มารันตัวเองเงียบๆ)
+# 10.3 Background Service Users
 print_and_log "${CYAN}>> Active Service Users (Running background processes):${NC}"
-# ดึงรายชื่อ User ที่มี Process รันอยู่ ตัด root และ user ระบบมาตรฐานทิ้ง
-ACTIVE_USERS=$(ps -eo user | sort | uniq | grep -vE "^(root|USER|syslog|daemon|messagebus|systemd|dbus|postfix|polkitd|chrony|ntp|ssh|nobody)$")
+ACTIVE_USERS=$(ps -eo user | sort | uniq | grep -vE "^(root|USER|syslog|daemon|messagebus|systemd|dbus|postfix|polkitd|chrony|ntp|ssh|nobody|systemd-network|systemd-resolve|avahi)$")
 if [ -n "$ACTIVE_USERS" ]; then
     echo "$ACTIVE_USERS" | while read -r usr; do
         PROC_COUNT=$(pgrep -u "$usr" | wc -l)
@@ -245,7 +223,7 @@ else
     print_and_log " - No suspicious service users running background tasks."
 fi
 
-# 10.4 Custom Systemd Services (User-created)
+# 10.4 Custom Systemd Services
 print_and_log "${CYAN}>> Custom Systemd Services (Manual/App Installations):${NC}"
 CUSTOM_SERVICES=$(find /etc/systemd/system -maxdepth 1 -type f -name "*.service" -exec basename {} \; 2>/dev/null | grep -vE "^(multi-user|default|dbus)")
 if [ -n "$CUSTOM_SERVICES" ]; then
@@ -261,7 +239,7 @@ else
     print_and_log " - No manual custom .service files found."
 fi
 
-# 10.5 Docker & Container Check
+# 10.5 Docker Containers
 print_and_log "${CYAN}>> Docker Containers:${NC}"
 if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
     DOCKER_COUNT=$(docker ps -q 2>/dev/null | wc -l)
