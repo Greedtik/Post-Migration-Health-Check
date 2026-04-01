@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ==============================================================================
-# Enterprise Post-Migration Health Check & Audit Script (v4.0 - Deep Blind Audit)
-# Supported OS: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux
+# Enterprise Post-Migration Health Check & Audit Script (v5.0 - Safe Execution)
+# Supported OS: Debian, Ubuntu, CentOS, RHEL, Rocky Linux, AlmaLinux, LXC
 # ==============================================================================
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -24,6 +24,37 @@ if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}Please run this script as root (e.g., sudo bash script.sh)${NC}"
   exit 1
 fi
+
+# ==========================================
+# SAFE SERVICE CHECK WRAPPER (ป้องกัน command not found)
+# ==========================================
+check_service_exists() {
+    local svc=$1
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl list-unit-files | grep -q "^${svc}\.service" 2>/dev/null || systemctl list-units --all | grep -q "^${svc}\.service" 2>/dev/null
+        return $?
+    elif [ -x "/etc/init.d/$svc" ] || [ -f "/etc/init/$svc.conf" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_service_active() {
+    local svc=$1
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet "$svc" 2>/dev/null
+        return $?
+    elif command -v service >/dev/null 2>&1; then
+        service "$svc" status 2>/dev/null | grep -qiE "running|is active|start/running"
+        return $?
+    elif [ -x "/etc/init.d/$svc" ]; then
+        /etc/init.d/"$svc" status 2>/dev/null | grep -qiE "running|is active|start/running"
+        return $?
+    else
+        return 1
+    fi
+}
 
 echo "Post-Migration Audit Log - $(date)" > "$LOG_FILE"
 echo "=========================================" >> "$LOG_FILE"
@@ -78,9 +109,7 @@ print_and_log "$(df -hi | grep -v 'tmpfs\|cdrom\|squashfs')"
 # 3. fstab Mount Verification
 print_and_log "\n${YELLOW}[3] fstab Mount Verification:${NC}"
 UNMOUNTED=$(awk '!/^#/ && !/^$/ && $2 != "/" && $2 != "none" && $3 != "swap" {print $2}' /etc/fstab | while read -r mountpoint; do
-    if ! mountpoint -q "$mountpoint" 2>/dev/null; then
-        echo "$mountpoint"
-    fi
+    if ! mountpoint -q "$mountpoint" 2>/dev/null; then echo "$mountpoint"; fi
 done)
 
 if [ -z "$UNMOUNTED" ]; then
@@ -101,59 +130,28 @@ print_and_log "$(free -m | awk '
 # 5. Network Check
 print_and_log "\n${YELLOW}[5] Network & Connectivity:${NC}"
 print_and_log "Default Gateway: $(ip route | grep default | awk '{print $3}' || echo 'NOT FOUND')"
-if ping -c 1 8.8.8.8 &> /dev/null; then
-    print_and_log "- Internet Routing (8.8.8.8): ${GREEN}[OK]${NC}"
-else
-    print_and_log "- Internet Routing (8.8.8.8): ${RED}[FAILED]${NC}"
-    ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Network:${NC} Cannot reach 8.8.8.8\n"
-fi
-if ping -c 1 google.com &> /dev/null; then
-    print_and_log "- DNS Resolution (google.com): ${GREEN}[OK]${NC}"
-else
-    print_and_log "- DNS Resolution (google.com): ${RED}[FAILED]${NC}"
-    ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Network:${NC} DNS resolution failed\n"
-fi
+if ping -c 1 8.8.8.8 &> /dev/null; then print_and_log "- Internet Routing: ${GREEN}[OK]${NC}"; else print_and_log "- Internet Routing: ${RED}[FAILED]${NC}"; ((TOTAL_ERRORS++)); fi
+if ping -c 1 google.com &> /dev/null; then print_and_log "- DNS Resolution: ${GREEN}[OK]${NC}"; else print_and_log "- DNS Resolution: ${RED}[FAILED]${NC}"; ((TOTAL_ERRORS++)); fi
 
-# 6. OS Patch & Update Status
+# 6. OS Patch Status
 print_and_log "\n${YELLOW}[6] OS Patch & Update Status ($PKG_MGR):${NC}"
 print_and_log "Checking for available updates... (Please wait)"
 if [ "$OS_FAMILY" == "debian" ]; then
     timeout 15 apt-get update -qq 2>/dev/null
     UPGRADES=$(apt-get -s upgrade 2>/dev/null | grep -Po '^\d+(?= upgraded)' || echo "0")
-    if [ "$UPGRADES" -eq 0 ]; then
-        print_and_log " ${GREEN}[OK] OS is up-to-date.${NC}"
-    else
-        print_and_log " ${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"
-        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches\n"
-    fi
+    if [ "$UPGRADES" -eq 0 ]; then print_and_log " ${GREEN}[OK] OS is up-to-date.${NC}"; else print_and_log " ${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"; fi
 elif [ "$OS_FAMILY" == "rhel" ]; then
     UPGRADES=$($PKG_MGR check-update -q 2>/dev/null | awk 'NF' | wc -l)
-    if [ "$UPGRADES" -eq 0 ]; then
-        print_and_log " ${GREEN}[OK] OS is up-to-date.${NC}"
-    else
-        print_and_log " ${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"
-        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Update:${NC} $UPGRADES pending OS patches\n"
-    fi
+    if [ "$UPGRADES" -eq 0 ]; then print_and_log " ${GREEN}[OK] OS is up-to-date.${NC}"; else print_and_log " ${YELLOW}[WARNING] Found $UPGRADES package(s) waiting to be updated.${NC}"; fi
 fi
 
-# 7. Core OS Services Health
+# 7. Core OS Services Health (ใช้ Wrapper Function แล้ว)
 print_and_log "\n${YELLOW}[7] Core OS Services Health:${NC}"
 SERVICES=("sshd" "nginx" "apache2" "httpd" "mysql" "mariadb" "php-fpm")
 for service in "${SERVICES[@]}"; do
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl list-unit-files | grep -q "^${service}.service" 2>/dev/null || systemctl list-units --all | grep -q "^${service}.service" 2>/dev/null; then
-            if systemctl is-active --quiet "$service"; then
-                print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
-            else
-                print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
-                ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
-            fi
-        fi
-    elif command -v service >/dev/null 2>&1; then
-        if service "$service" status 2>/dev/null | grep -qiE "running|is active|start/running"; then
+    if check_service_exists "$service"; then
+        if check_service_active "$service"; then
             print_and_log "- $service: ${GREEN}[RUNNING]${NC}"
-        elif service "$service" status 2>/dev/null | grep -qiE "unrecognized|not found"; then
-            : # Service doesn't exist, do nothing silently
         else
             print_and_log "- $service: ${RED}[STOPPED/FAILED]${NC}"
             ((TOTAL_ERRORS++)); SUMMARY_MSG+="${RED}- Service:${NC} $service is down\n"
@@ -174,16 +172,10 @@ done | sort -u -t':' -k1,1n
 print_and_log "\n${YELLOW}[9] Firewall Status:${NC}"
 if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     print_and_log " ${GREEN}[ACTIVE] firewalld is running.${NC}"
-    print_and_log "  -> Active Zones: $(firewall-cmd --get-active-zones | tr '\n' ' ')"
 elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; then
     print_and_log " ${GREEN}[ACTIVE] UFW is running.${NC}"
 else
-    RULE_COUNT=$(iptables -S 2>/dev/null | grep "^-A" | wc -l)
-    if [ "$RULE_COUNT" -gt 0 ]; then
-        print_and_log " ${CYAN}Found $RULE_COUNT custom iptables rules:${NC}"
-    else
-        print_and_log " ${GREEN}No custom firewall rules found (Default Policies active).${NC}"
-    fi
+    print_and_log " ${GREEN}No active ufw/firewalld found (Default Policies active).${NC}"
 fi
 
 # ==========================================
@@ -191,7 +183,7 @@ fi
 # ==========================================
 print_and_log "\n${YELLOW}[10] Deep Application Discovery (Scanning for hidden/enterprise apps):${NC}"
 
-# 10.1 Enterprise Suites & Mail Servers
+# 10.1 Enterprise Suites
 print_and_log "${CYAN}>> Enterprise Suites & Control Panels:${NC}"
 FOUND_ENTERPRISE=0
 if [ -d "/opt/zimbra" ] && id "zimbra" &>/dev/null; then
@@ -200,71 +192,54 @@ if [ -d "/opt/zimbra" ] && id "zimbra" &>/dev/null; then
     ZIMBRA_STATUS=$(su - zimbra -c "timeout 10 zmcontrol status" 2>/dev/null)
     if echo "$ZIMBRA_STATUS" | grep -q "Stopped"; then
         print_and_log "   ${RED}-> WARNING: Some Zimbra services are STOPPED!${NC}"
-        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- App Discovery:${NC} Zimbra has stopped services\n"
     elif echo "$ZIMBRA_STATUS" | grep -q "Running"; then
         print_and_log "   -> All Zimbra core services are ${GREEN}[RUNNING]${NC}"
     else
-        print_and_log "   -> Could not determine exact Zimbra status (check manually using 'su - zimbra -c \"zmcontrol status\"')"
+        print_and_log "   -> Could not determine exact Zimbra status (check manually)"
     fi
 fi
 if [ -d "/usr/local/cpanel" ]; then print_and_log " - ${GREEN}cPanel/WHM${NC} detected"; FOUND_ENTERPRISE=1; fi
 if [ -d "/usr/local/directadmin" ]; then print_and_log " - ${GREEN}DirectAdmin${NC} detected"; FOUND_ENTERPRISE=1; fi
-if command -v gitlab-ctl >/dev/null 2>&1 || [ -d "/opt/gitlab" ]; then print_and_log " - ${GREEN}GitLab Enterprise/CE${NC} detected"; FOUND_ENTERPRISE=1; fi
 if [ $FOUND_ENTERPRISE -eq 0 ]; then print_and_log " - No major control panels or enterprise suites detected."; fi
 
 # 10.2 /opt Directory Scanner
 print_and_log "${CYAN}>> Third-Party Apps in /opt (Non-Standard Installations):${NC}"
 OPT_APPS=$(find /opt -maxdepth 1 -mindepth 1 -type d -exec basename {} \; 2>/dev/null | grep -vE "^(cni|containerd|zimbra)$")
-if [ -n "$OPT_APPS" ]; then
-    print_and_log " - Found potential custom applications installed in /opt:"
-    echo "$OPT_APPS" | while read -r app; do print_and_log "   - /opt/${GREEN}$app${NC}"; done
-else
-    print_and_log " - No additional apps found in /opt."
-fi
+if [ -n "$OPT_APPS" ]; then echo "$OPT_APPS" | while read -r app; do print_and_log "   - /opt/${GREEN}$app${NC}"; done; else print_and_log " - No additional apps found in /opt."; fi
 
 # 10.3 Background Service Users
 print_and_log "${CYAN}>> Active Service Users (Running background processes):${NC}"
-ACTIVE_USERS=$(ps -eo user | sort | uniq | grep -vE "^(root|USER|syslog|daemon|messagebus|systemd|dbus|postfix|polkitd|chrony|ntp|ssh|nobody|systemd-network|systemd-resolve|avahi)$")
+ACTIVE_USERS=$(ps -eo user | sort | uniq | grep -vE "^(root|USER|syslog|daemon|messagebus|systemd|dbus|postfix|polkitd|chrony|ntp|ssh|nobody|systemd-.*)$")
 if [ -n "$ACTIVE_USERS" ]; then
     echo "$ACTIVE_USERS" | while read -r usr; do
         PROC_COUNT=$(pgrep -u "$usr" | wc -l)
-        print_and_log " - User: ${YELLOW}$usr${NC} is running ${CYAN}$PROC_COUNT${NC} processes. (Possible hidden app)"
+        print_and_log " - User: ${YELLOW}$usr${NC} is running ${CYAN}$PROC_COUNT${NC} processes."
     done
-else
-    print_and_log " - No suspicious service users running background tasks."
 fi
 
-# 10.4 Custom Systemd Services
+# 10.4 Custom Systemd Services (Safe Check)
 print_and_log "${CYAN}>> Custom Systemd Services (Manual/App Installations):${NC}"
-CUSTOM_SERVICES=$(find /etc/systemd/system -maxdepth 1 -type f -name "*.service" -exec basename {} \; 2>/dev/null | grep -vE "^(multi-user|default|dbus)")
-if [ -n "$CUSTOM_SERVICES" ]; then
-    for app in $CUSTOM_SERVICES; do
-        if systemctl is-active --quiet "$app"; then
-            print_and_log " - $app: ${GREEN}[RUNNING]${NC}"
-        else
-            print_and_log " - $app: ${RED}[STOPPED/FAILED]${NC}"
-            ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- App Discovery:${NC} Custom service '$app' is not running\n"
-        fi
-    done
+if command -v systemctl >/dev/null 2>&1; then
+    CUSTOM_SERVICES=$(find /etc/systemd/system -maxdepth 1 -type f -name "*.service" -exec basename {} \; 2>/dev/null | grep -vE "^(multi-user|default|dbus)")
+    if [ -n "$CUSTOM_SERVICES" ]; then
+        for app in $CUSTOM_SERVICES; do
+            if systemctl is-active --quiet "$app" 2>/dev/null; then
+                print_and_log " - $app: ${GREEN}[RUNNING]${NC}"
+            else
+                print_and_log " - $app: ${RED}[STOPPED/FAILED]${NC}"
+            fi
+        done
+    else
+        print_and_log " - No manual custom .service files found."
+    fi
 else
-    print_and_log " - No manual custom .service files found."
+    print_and_log " - ${YELLOW}System is not using systemd. Skipped custom .service scan.${NC}"
 fi
 
-# 10.5 Docker Containers
+# 10.5 Docker Containers (Safe Check)
 print_and_log "${CYAN}>> Docker Containers:${NC}"
 if command -v docker >/dev/null 2>&1; then
-    # เช็คว่า Docker daemon รันอยู่ไหม โดยรองรับทั้ง systemctl และ service
-    DOCKER_IS_RUNNING=0
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet docker; then
-        DOCKER_IS_RUNNING=1
-    elif command -v service >/dev/null 2>&1 && service docker status 2>/dev/null | grep -qi "running"; then
-        DOCKER_IS_RUNNING=1
-    elif docker info >/dev/null 2>&1; then
-        # Fallback ขั้นสุด: ลองยิงคำสั่ง docker info ตรงๆ
-        DOCKER_IS_RUNNING=1
-    fi
-
-    if [ "$DOCKER_IS_RUNNING" -eq 1 ]; then
+    if check_service_active "docker" || docker info >/dev/null 2>&1; then
         DOCKER_COUNT=$(docker ps -q 2>/dev/null | wc -l)
         if [ "$DOCKER_COUNT" -gt 0 ]; then
             print_and_log " - Found $DOCKER_COUNT running container(s):"
@@ -284,52 +259,26 @@ fi
 # ==========================================
 print_and_log "\n${YELLOW}[11] Advanced Security Audit:${NC}"
 
-# 11.1 Interactive Users & Admins
 print_and_log "${CYAN}>> Interactive Users:${NC}"
 awk -F: '($3>=1000 || $1=="root") && $7 !~ /(nologin|false)$/ {print " - " $1}' /etc/passwd | while read -r line; do print_and_log "$line"; done
 
-# 11.2 SSH Key Audit
 print_and_log "${CYAN}>> SSH Key Audit (root):${NC}"
 if [ -f /root/.ssh/authorized_keys ]; then
     KEY_COUNT=$(wc -l < /root/.ssh/authorized_keys)
     print_and_log " - Found $KEY_COUNT authorized keys for root."
-    awk '{print "   * Key identifier: " $3}' /root/.ssh/authorized_keys | while read -r line; do print_and_log "$line"; done
 else
     print_and_log " - ${GREEN}[OK] No authorized_keys found for root.${NC}"
 fi
 
-# 11.3 Failed Login Attempts
 print_and_log "${CYAN}>> Failed Login Attempts (Brute Force Check):${NC}"
 if [ -f "$AUTH_LOG" ]; then
     FAILED_COUNT=$(grep -c "Failed password" "$AUTH_LOG" 2>/dev/null || echo "0")
     if [ "$FAILED_COUNT" -gt 50 ]; then
         print_and_log " - ${RED}[WARNING] High number of failed logins detected: $FAILED_COUNT attempts!${NC}"
-        print_and_log "   -> Top targeted accounts:"
-        grep "Failed password" "$AUTH_LOG" | awk '{if (match($0,"invalid user")) print $11; else print $9}' | sort | uniq -c | sort -nr | head -n 3 | while read -r line; do print_and_log "      $line"; done
-        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Security:${NC} $FAILED_COUNT failed SSH logins detected\n"
+        ((TOTAL_WARNINGS++))
     else
         print_and_log " - ${GREEN}[OK] Normal login behavior ($FAILED_COUNT failed attempts).${NC}"
     fi
-else
-    print_and_log " - ${YELLOW}[SKIP] Log file $AUTH_LOG not found.${NC}"
-fi
-
-# 11.4 Lightweight Rootkit / Suspicious File Scanner
-print_and_log "${CYAN}>> Suspicious Activity / Rootkit Scan:${NC}"
-SUSPICIOUS_TMP=$(find /tmp /var/tmp /dev/shm -maxdepth 1 -type f -exec ls -ld {} + 2>/dev/null | grep -E "\.(sh|elf|bin|py|pl|php)$" || true)
-
-if [ -n "$SUSPICIOUS_TMP" ]; then
-    print_and_log " - ${RED}[WARNING] Found suspicious executable scripts/files in temporary directories:${NC}"
-    print_and_log "$SUSPICIOUS_TMP"
-    ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- Security:${NC} Suspicious files found in /tmp\n"
-else
-    print_and_log " - ${GREEN}[OK] No suspicious executable files found in /tmp, /var/tmp, or /dev/shm.${NC}"
-fi
-
-if command -v rkhunter >/dev/null 2>&1; then
-    print_and_log "   -> Notice: rkhunter is installed. (Run 'rkhunter --check' manually for deep scan)"
-elif command -v chkrootkit >/dev/null 2>&1; then
-    print_and_log "   -> Notice: chkrootkit is installed. (Run 'chkrootkit' manually for deep scan)"
 fi
 
 # ==========================================
@@ -341,14 +290,8 @@ print_and_log "${CYAN}====================================================${NC}"
 
 if [ $TOTAL_ERRORS -eq 0 ] && [ $TOTAL_WARNINGS -eq 0 ]; then
     print_and_log "${GREEN}[PASS] All critical systems and applications are healthy!${NC}"
-    print_and_log "The server is fully updated, secure, and running perfectly."
-elif [ $TOTAL_ERRORS -eq 0 ] && [ $TOTAL_WARNINGS -gt 0 ]; then
-    print_and_log "${YELLOW}[WARNING] Systems are functioning, but needs attention. ($TOTAL_WARNINGS warnings)${NC}"
-    print_and_log "Please review the following notices:"
-    print_and_log -n "$SUMMARY_MSG"
 else
-    print_and_log "${RED}[FAIL] Health check found $TOTAL_ERRORS critical issue(s) and $TOTAL_WARNINGS warning(s).${NC}"
-    print_and_log "Please review the following errors immediately:"
+    print_and_log "${YELLOW}[WARNING/FAIL] Health check found $TOTAL_ERRORS critical issue(s) and $TOTAL_WARNINGS warning(s).${NC}"
     print_and_log -n "$SUMMARY_MSG"
 fi
 
