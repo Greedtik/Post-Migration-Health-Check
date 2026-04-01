@@ -176,13 +176,78 @@ else
 fi
 
 # ==========================================
-# 10. Application Discovery (Blind Audit)
+# 10. Deep Application Discovery (Blind Audit v4)
 # ==========================================
-print_and_log "\n${YELLOW}[10] Application Discovery (Scanning for user-installed apps):${NC}"
+print_and_log "\n${YELLOW}[10] Deep Application Discovery (Scanning for hidden/enterprise apps):${NC}"
 
-# 10.1 Custom Systemd Services
-print_and_log "${CYAN}>> Custom Systemd Services (User-created):${NC}"
-CUSTOM_SERVICES=$(find /etc/systemd/system -maxdepth 1 -type f -name "*.service" -exec basename {} \; 2>/dev/null)
+# 10.1 Enterprise Suites & Mail Servers (Zimbra, GitLab, cPanel, etc.)
+print_and_log "${CYAN}>> Enterprise Suites & Control Panels:${NC}"
+FOUND_ENTERPRISE=0
+
+# เช็ค Zimbra Mail
+if [ -d "/opt/zimbra" ] && id "zimbra" &>/dev/null; then
+    print_and_log " - ${GREEN}Zimbra Collaboration Suite${NC} detected (/opt/zimbra)"
+    FOUND_ENTERPRISE=1
+    # พยายามเช็คสถานะผ่าน zmcontrol (timeout ป้องกันสคริปต์ค้าง)
+    ZIMBRA_STATUS=$(su - zimbra -c "timeout 10 zmcontrol status" 2>/dev/null)
+    if echo "$ZIMBRA_STATUS" | grep -q "Stopped"; then
+        print_and_log "   ${RED}-> WARNING: Some Zimbra services are STOPPED!${NC}"
+        ((TOTAL_WARNINGS++)); SUMMARY_MSG+="${YELLOW}- App Discovery:${NC} Zimbra has stopped services\n"
+    elif echo "$ZIMBRA_STATUS" | grep -q "Running"; then
+        print_and_log "   -> All Zimbra core services are ${GREEN}[RUNNING]${NC}"
+    else
+        print_and_log "   -> Could not determine exact Zimbra status (check manually using 'zmcontrol status')"
+    fi
+fi
+
+# เช็ค cPanel / WHM
+if [ -d "/usr/local/cpanel" ]; then
+    print_and_log " - ${GREEN}cPanel/WHM${NC} detected"
+    FOUND_ENTERPRISE=1
+fi
+
+# เช็ค DirectAdmin
+if [ -d "/usr/local/directadmin" ]; then
+    print_and_log " - ${GREEN}DirectAdmin${NC} detected"
+    FOUND_ENTERPRISE=1
+fi
+
+# เช็ค GitLab
+if command -v gitlab-ctl >/dev/null 2>&1 || [ -d "/opt/gitlab" ]; then
+    print_and_log " - ${GREEN}GitLab Enterprise/CE${NC} detected"
+    FOUND_ENTERPRISE=1
+fi
+
+if [ $FOUND_ENTERPRISE -eq 0 ]; then
+    print_and_log " - No major control panels or enterprise suites (Zimbra/cPanel/GitLab) detected."
+fi
+
+# 10.2 /opt Directory Scanner (แหล่งซ่อนตัวของ Third-Party Apps)
+print_and_log "${CYAN}>> Third-Party Apps in /opt (Non-Standard Installations):${NC}"
+OPT_APPS=$(find /opt -maxdepth 1 -mindepth 1 -type d -exec basename {} \; 2>/dev/null | grep -vE "^(cni|containerd|zimbra)$")
+if [ -n "$OPT_APPS" ]; then
+    print_and_log " - Found potential custom applications installed in /opt:"
+    echo "$OPT_APPS" | while read -r app; do print_and_log "   - /opt/${GREEN}$app${NC}"; done
+else
+    print_and_log " - No additional apps found in /opt."
+fi
+
+# 10.3 Background Service Users (แอปที่สร้าง User มารันตัวเองเงียบๆ)
+print_and_log "${CYAN}>> Active Service Users (Running background processes):${NC}"
+# ดึงรายชื่อ User ที่มี Process รันอยู่ ตัด root และ user ระบบมาตรฐานทิ้ง
+ACTIVE_USERS=$(ps -eo user | sort | uniq | grep -vE "^(root|USER|syslog|daemon|messagebus|systemd|dbus|postfix|polkitd|chrony|ntp|ssh|nobody)$")
+if [ -n "$ACTIVE_USERS" ]; then
+    echo "$ACTIVE_USERS" | while read -r usr; do
+        PROC_COUNT=$(pgrep -u "$usr" | wc -l)
+        print_and_log " - User: ${YELLOW}$usr${NC} is running ${CYAN}$PROC_COUNT${NC} processes. (Possible hidden app)"
+    done
+else
+    print_and_log " - No suspicious service users running background tasks."
+fi
+
+# 10.4 Custom Systemd Services (User-created)
+print_and_log "${CYAN}>> Custom Systemd Services (Manual/App Installations):${NC}"
+CUSTOM_SERVICES=$(find /etc/systemd/system -maxdepth 1 -type f -name "*.service" -exec basename {} \; 2>/dev/null | grep -vE "^(multi-user|default|dbus)")
 if [ -n "$CUSTOM_SERVICES" ]; then
     for app in $CUSTOM_SERVICES; do
         if systemctl is-active --quiet "$app"; then
@@ -193,54 +258,22 @@ if [ -n "$CUSTOM_SERVICES" ]; then
         fi
     done
 else
-    print_and_log " - ${GREEN}No manual custom .service files found.${NC}"
+    print_and_log " - No manual custom .service files found."
 fi
 
-# 10.2 Docker Containers
+# 10.5 Docker & Container Check
 print_and_log "${CYAN}>> Docker Containers:${NC}"
-if command -v docker >/dev/null 2>&1; then
-    if systemctl is-active --quiet docker || service docker status >/dev/null 2>&1; then
-        DOCKER_COUNT=$(docker ps -q 2>/dev/null | wc -l)
-        if [ "$DOCKER_COUNT" -gt 0 ]; then
-            print_and_log " - Found $DOCKER_COUNT running container(s):"
-            docker ps --format "   - {{.Names}} ({{.Image}}) - {{.Status}}" | while read -r line; do print_and_log "$line"; done
-        else
-            print_and_log " - Docker is running, but 0 active containers."
-        fi
+if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker; then
+    DOCKER_COUNT=$(docker ps -q 2>/dev/null | wc -l)
+    if [ "$DOCKER_COUNT" -gt 0 ]; then
+        print_and_log " - Found $DOCKER_COUNT running container(s):"
+        docker ps --format "   - {{.Names}} ({{.Image}})" | while read -r line; do print_and_log "$line"; done
     else
-        print_and_log " - Docker is installed but ${RED}[STOPPED]${NC}."
+        print_and_log " - Docker is running, but 0 active containers."
     fi
 else
-    print_and_log " - Docker not installed."
+    print_and_log " - Docker not active or not installed."
 fi
-
-# 10.3 PM2 Process Manager
-print_and_log "${CYAN}>> PM2 Process Manager (Node.js/Python apps):${NC}"
-if command -v pm2 >/dev/null 2>&1; then
-    PM2_APPS=$(pm2 jlist 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4)
-    if [ -n "$PM2_APPS" ]; then
-        print_and_log " - Found PM2 Apps:"
-        echo "$PM2_APPS" | while read -r app; do print_and_log "   - $app: ${GREEN}[RUNNING/MANAGED]${NC}"; done
-    else
-        print_and_log " - PM2 installed, but no apps running."
-    fi
-else
-    print_and_log " - PM2 not installed."
-fi
-
-# 10.4 Common Third-Party Infrastructure
-print_and_log "${CYAN}>> Common Third-Party Infrastructure (Active):${NC}"
-COMMON_APPS=("redis" "redis-server" "mongod" "postgresql" "rabbitmq-server" "memcached" "elasticsearch" "tomcat" "jenkins" "grafana-server" "prometheus" "haproxy")
-FOUND_COMMON=0
-for app in "${COMMON_APPS[@]}"; do
-    if systemctl list-unit-files | grep -q "^${app}.service" 2>/dev/null; then
-        if systemctl is-active --quiet "$app"; then
-            print_and_log " - $app: ${GREEN}[RUNNING]${NC}"
-            FOUND_COMMON=1
-        fi
-    fi
-done
-if [ $FOUND_COMMON -eq 0 ]; then print_and_log " - None of the standard 3rd-party databases/middlewares detected."; fi
 
 # ==========================================
 # 11. Advanced Security Audit
